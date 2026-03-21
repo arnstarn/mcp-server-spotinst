@@ -59,6 +59,29 @@ class SpotinstClient:
         data = resp.json()
         return data.get("response", data)
 
+    async def _put(
+        self, path: str, body: dict[str, Any], account_id: str = ""
+    ) -> Any:
+        resp = await self._client.put(
+            path, params=self._account_params(account_id), json=body
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", data)
+
+    async def _delete(
+        self, path: str, account_id: str = "", body: dict[str, Any] | None = None
+    ) -> Any:
+        resp = await self._client.request(
+            "DELETE",
+            path,
+            params=self._account_params(account_id),
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", data)
+
     async def _get_safe(
         self, path: str, params: dict[str, str] | None = None, account_id: str = ""
     ) -> Any | None:
@@ -293,6 +316,83 @@ class SpotinstClient:
         return await self._get(
             f"{AWS_CLUSTER}/{cluster_id}/allowedInstanceTypes",
             account_id=account_id,
+        )
+
+    # ===================================================================
+    # WRITE OPERATIONS (destructive — use with caution)
+    # ===================================================================
+
+    # --- Initiate Roll ---
+
+    async def initiate_roll(
+        self,
+        cluster_id: str,
+        batch_size_percentage: int = 20,
+        batch_min_healthy_percentage: int = 50,
+        respect_pdb: bool = True,
+        launch_spec_ids: list[str] | None = None,
+        instance_ids: list[str] | None = None,
+        account_id: str = "",
+        cloud: str = "aws",
+    ) -> Any:
+        prefix = AZURE_CLUSTER if cloud == "azure" else AWS_CLUSTER
+        body: dict[str, Any] = {
+            "roll": {
+                "batchSizePercentage": batch_size_percentage,
+                "batchMinHealthyPercentage": batch_min_healthy_percentage,
+                "respectPdb": respect_pdb,
+            }
+        }
+        if launch_spec_ids:
+            body["roll"]["launchSpecIds"] = launch_spec_ids
+        if instance_ids:
+            body["roll"]["instanceIds"] = instance_ids
+        return await self._post(
+            f"{prefix}/{cluster_id}/roll", body, account_id=account_id
+        )
+
+    # --- Detach Instances ---
+
+    async def detach_instances(
+        self,
+        cluster_id: str,
+        instance_ids: list[str],
+        should_decrement_target_capacity: bool = True,
+        should_terminate_instances: bool = True,
+        account_id: str = "",
+    ) -> Any:
+        body = {
+            "instancesToDetach": instance_ids,
+            "shouldDecrementTargetCapacity": should_decrement_target_capacity,
+            "shouldTerminateInstances": should_terminate_instances,
+        }
+        return await self._put(
+            f"{AWS_CLUSTER}/{cluster_id}/detachInstances",
+            body,
+            account_id=account_id,
+        )
+
+    # --- Update VNG ---
+
+    async def update_vng(
+        self,
+        vng_id: str,
+        updates: dict[str, Any],
+        account_id: str = "",
+    ) -> Any:
+        body = {"launchSpec": updates}
+        return await self._put(
+            f"{AWS_VNG}/{vng_id}", body, account_id=account_id
+        )
+
+    async def update_vng_azure(
+        self,
+        vng_id: str,
+        updates: dict[str, Any],
+        account_id: str = "",
+    ) -> Any:
+        return await self._put(
+            f"{AZURE_VNG}/{vng_id}", updates, account_id=account_id
         )
 
     async def close(self) -> None:

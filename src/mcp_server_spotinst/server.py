@@ -1,6 +1,7 @@
 """MCP server for Spot.io (Spotinst) API."""
 
 import json
+
 from mcp.server.fastmcp import FastMCP
 
 from .spotinst_client import SpotinstClient
@@ -316,6 +317,151 @@ async def get_allowed_instance_types(
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
     """
     result = await _get_client().get_allowed_instance_types(cluster_id, account_id)
+    return _format(result)
+
+
+# ===================================================================
+# WRITE OPERATIONS (destructive — require confirm=true)
+# ===================================================================
+
+
+@mcp.tool()
+async def initiate_roll(
+    cluster_id: str,
+    confirm: bool = False,
+    batch_size_percentage: int = 20,
+    batch_min_healthy_percentage: int = 50,
+    respect_pdb: bool = True,
+    launch_spec_ids: str = "",
+    instance_ids: str = "",
+    account_id: str = "",
+    cloud: str = "aws",
+) -> str:
+    """DESTRUCTIVE: Initiate a rolling restart of nodes in an Ocean cluster.
+    This will drain and replace nodes in batches. Requires confirm=true.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        confirm: Must be true to execute. Safety guard against accidental rolls.
+        batch_size_percentage: Percentage of nodes to roll per batch (default: 20)
+        batch_min_healthy_percentage: Min healthy nodes per batch (default: 50)
+        respect_pdb: Respect PodDisruptionBudgets (default: true)
+        launch_spec_ids: Comma-separated VNG IDs to roll (e.g. ols-abc,ols-def). Empty = all.
+        instance_ids: Comma-separated instance IDs to roll. Empty = all in scope.
+        account_id: Optional account ID. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    if not confirm:
+        return (
+            "SAFETY: Roll NOT initiated. Set confirm=true to execute.\n"
+            f"This will rolling-restart nodes in cluster {cluster_id} "
+            f"({batch_size_percentage}% per batch)."
+        )
+    lspec_ids = [s.strip() for s in launch_spec_ids.split(",") if s.strip()] or None
+    inst_ids = [s.strip() for s in instance_ids.split(",") if s.strip()] or None
+    result = await _get_client().initiate_roll(
+        cluster_id,
+        batch_size_percentage,
+        batch_min_healthy_percentage,
+        respect_pdb,
+        lspec_ids,
+        inst_ids,
+        account_id,
+        cloud,
+    )
+    return _format(result)
+
+
+@mcp.tool()
+async def detach_instances(
+    cluster_id: str,
+    instance_ids: str,
+    confirm: bool = False,
+    should_terminate: bool = True,
+    should_decrement_capacity: bool = True,
+    account_id: str = "",
+) -> str:
+    """DESTRUCTIVE: Detach and optionally terminate instances from an AWS Ocean cluster.
+    Requires confirm=true.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        instance_ids: Comma-separated EC2 instance IDs (e.g. i-abc123,i-def456)
+        confirm: Must be true to execute. Safety guard.
+        should_terminate: Terminate instances after detach (default: true)
+        should_decrement_capacity: Reduce target capacity (default: true)
+        account_id: Optional account ID. Defaults to SPOTINST_ACCOUNT_ID env var.
+    """
+    ids = [s.strip() for s in instance_ids.split(",") if s.strip()]
+    if not confirm:
+        action = "terminate and detach" if should_terminate else "detach (keep running)"
+        return (
+            f"SAFETY: Detach NOT executed. Set confirm=true to execute.\n"
+            f"This will {action} {len(ids)} instance(s) from cluster {cluster_id}: {ids}"
+        )
+    if not ids:
+        return "ERROR: No instance IDs provided."
+    result = await _get_client().detach_instances(
+        cluster_id, ids, should_decrement_capacity, should_terminate, account_id
+    )
+    return _format(result)
+
+
+@mcp.tool()
+async def update_vng(
+    vng_id: str,
+    updates_json: str,
+    confirm: bool = False,
+    account_id: str = "",
+) -> str:
+    """DESTRUCTIVE: Update an AWS VNG (launch spec) configuration.
+    Requires confirm=true. Pass updates as a JSON string.
+
+    Args:
+        vng_id: The VNG/launch spec ID (e.g. ols-abc12345)
+        updates_json: JSON string of fields to update (e.g. '{"resourceLimits": {"maxInstanceCount": 20}}')
+        confirm: Must be true to execute. Safety guard.
+        account_id: Optional account ID. Defaults to SPOTINST_ACCOUNT_ID env var.
+    """
+    try:
+        updates = json.loads(updates_json)
+    except json.JSONDecodeError as e:
+        return f"ERROR: Invalid JSON in updates_json: {e}"
+    if not confirm:
+        return (
+            f"SAFETY: Update NOT applied. Set confirm=true to execute.\n"
+            f"This will update VNG {vng_id} with: {json.dumps(updates, indent=2)}"
+        )
+    result = await _get_client().update_vng(vng_id, updates, account_id)
+    return _format(result)
+
+
+@mcp.tool()
+async def update_vng_azure(
+    vng_id: str,
+    updates_json: str,
+    confirm: bool = False,
+    account_id: str = "",
+) -> str:
+    """DESTRUCTIVE: Update an Azure VNG configuration.
+    Requires confirm=true. Pass updates as a JSON string.
+
+    Args:
+        vng_id: The VNG ID (e.g. vng-14e08b61)
+        updates_json: JSON string of fields to update
+        confirm: Must be true to execute. Safety guard.
+        account_id: Account ID for an Azure account.
+    """
+    try:
+        updates = json.loads(updates_json)
+    except json.JSONDecodeError as e:
+        return f"ERROR: Invalid JSON in updates_json: {e}"
+    if not confirm:
+        return (
+            f"SAFETY: Update NOT applied. Set confirm=true to execute.\n"
+            f"This will update Azure VNG {vng_id} with: {json.dumps(updates, indent=2)}"
+        )
+    result = await _get_client().update_vng_azure(vng_id, updates, account_id)
     return _format(result)
 
 
