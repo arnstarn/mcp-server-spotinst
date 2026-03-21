@@ -1,8 +1,13 @@
 # mcp-server-spotinst
 
+[![PyPI version](https://img.shields.io/pypi/v/mcp-server-spotinst)](https://pypi.org/project/mcp-server-spotinst/)
+[![CI](https://github.com/arnstarn/mcp-server-spotinst/actions/workflows/ci.yml/badge.svg)](https://github.com/arnstarn/mcp-server-spotinst/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
 MCP server for the [Spot.io (Spotinst)](https://spot.io/) API. Supports both AWS and Azure Ocean clusters with multi-account access.
 
-## Tools (19)
+## Tools (23)
 
 ### Cross-Account
 
@@ -42,6 +47,15 @@ MCP server for the [Spot.io (Spotinst)](https://spot.io/) API. Supports both AWS
 | `list_rolls` | List deployment rolls |
 | `get_roll` | Get roll details |
 | `get_cluster_log` | Get scaling and activity log events |
+
+### Write Operations (require `confirm=true`)
+
+| Tool | Description |
+|------|-------------|
+| `initiate_roll` | Rolling restart of nodes in an Ocean cluster |
+| `detach_instances` | Detach and optionally terminate instances from an AWS Ocean cluster |
+| `update_vng` | Update an AWS VNG configuration |
+| `update_vng_azure` | Update an Azure VNG configuration |
 
 All tools accept an optional `account_id` parameter to query any account.
 
