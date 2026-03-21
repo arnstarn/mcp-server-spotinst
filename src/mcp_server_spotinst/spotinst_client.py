@@ -1,11 +1,20 @@
 """Spot.io (Spotinst) API client."""
 
+import asyncio
 import os
 from typing import Any
 
 import httpx
 
 BASE_URL = "https://api.spotinst.io"
+
+# API path prefixes per cloud provider
+AWS_CLUSTER = "/ocean/aws/k8s/cluster"
+AWS_VNG = "/ocean/aws/k8s/launchSpec"
+AZURE_CLUSTER = "/ocean/azure/np/cluster"
+AZURE_VNG = "/ocean/azure/np/virtualNodeGroup"
+# Azure costs oddly use the k8s path
+AZURE_COSTS_CLUSTER = "/ocean/azure/k8s/cluster"
 
 
 class SpotinstClient:
@@ -50,22 +59,100 @@ class SpotinstClient:
         data = resp.json()
         return data.get("response", data)
 
+    async def _get_safe(
+        self, path: str, params: dict[str, str] | None = None, account_id: str = ""
+    ) -> Any | None:
+        """Like _get but returns None on 400/404 instead of raising."""
+        all_params = self._account_params(account_id)
+        if params:
+            all_params.update(params)
+        resp = await self._client.get(path, params=all_params)
+        if resp.status_code in (400, 404):
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", data)
+
+    async def _post_safe(
+        self, path: str, body: dict[str, Any], account_id: str = ""
+    ) -> Any | None:
+        """Like _post but returns None on 400/404 instead of raising."""
+        resp = await self._client.post(
+            path, params=self._account_params(account_id), json=body
+        )
+        if resp.status_code in (400, 404):
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", data)
+
     # --- Accounts ---
 
     async def list_accounts(self) -> Any:
         return await self._get("/setup/account")
 
-    # --- Ocean Clusters ---
+    # --- All Clusters (cross-account, cross-cloud) ---
+
+    async def list_all_clusters(self) -> list[dict[str, Any]]:
+        """List clusters across all accounts and cloud providers."""
+        accounts_resp = await self.list_accounts()
+        accounts = accounts_resp.get("items", [])
+
+        async def _get_clusters_for_account(
+            acct: dict[str, Any],
+        ) -> list[dict[str, Any]]:
+            aid = acct["accountId"]
+            provider = acct.get("cloudProvider", "")
+            results = []
+
+            if provider == "AWS":
+                resp = await self._get_safe(AWS_CLUSTER, account_id=aid)
+                if resp and resp.get("items"):
+                    for c in resp["items"]:
+                        c["_accountId"] = aid
+                        c["_accountName"] = acct["name"]
+                        c["_cloudProvider"] = "AWS"
+                        results.append(c)
+
+            elif provider == "AZURE":
+                resp = await self._get_safe(AZURE_CLUSTER, account_id=aid)
+                if resp and resp.get("items"):
+                    for c in resp["items"]:
+                        c["_accountId"] = aid
+                        c["_accountName"] = acct["name"]
+                        c["_cloudProvider"] = "AZURE"
+                        results.append(c)
+
+            return results
+
+        tasks = [_get_clusters_for_account(a) for a in accounts]
+        all_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        clusters = []
+        for result in all_results:
+            if isinstance(result, list):
+                clusters.extend(result)
+        return clusters
+
+    # --- Ocean Clusters (AWS) ---
 
     async def list_clusters(self, account_id: str = "") -> Any:
-        return await self._get("/ocean/aws/k8s/cluster", account_id=account_id)
+        return await self._get(AWS_CLUSTER, account_id=account_id)
 
     async def get_cluster(self, cluster_id: str, account_id: str = "") -> Any:
+        return await self._get(f"{AWS_CLUSTER}/{cluster_id}", account_id=account_id)
+
+    # --- Ocean Clusters (Azure) ---
+
+    async def list_clusters_azure(self, account_id: str = "") -> Any:
+        return await self._get(AZURE_CLUSTER, account_id=account_id)
+
+    async def get_cluster_azure(self, cluster_id: str, account_id: str = "") -> Any:
         return await self._get(
-            f"/ocean/aws/k8s/cluster/{cluster_id}", account_id=account_id
+            f"{AZURE_CLUSTER}/{cluster_id}", account_id=account_id
         )
 
-    # --- Ocean Launch Specs (VNGs) ---
+    # --- Ocean VNGs (AWS) ---
 
     async def list_vngs(
         self, ocean_id: str | None = None, account_id: str = ""
@@ -73,14 +160,23 @@ class SpotinstClient:
         params = {}
         if ocean_id:
             params["oceanId"] = ocean_id
-        return await self._get(
-            "/ocean/aws/k8s/launchSpec", params, account_id=account_id
-        )
+        return await self._get(AWS_VNG, params, account_id=account_id)
 
     async def get_vng(self, vng_id: str, account_id: str = "") -> Any:
-        return await self._get(
-            f"/ocean/aws/k8s/launchSpec/{vng_id}", account_id=account_id
-        )
+        return await self._get(f"{AWS_VNG}/{vng_id}", account_id=account_id)
+
+    # --- Ocean VNGs (Azure) ---
+
+    async def list_vngs_azure(
+        self, ocean_id: str | None = None, account_id: str = ""
+    ) -> Any:
+        params = {}
+        if ocean_id:
+            params["oceanId"] = ocean_id
+        return await self._get(AZURE_VNG, params, account_id=account_id)
+
+    async def get_vng_azure(self, vng_id: str, account_id: str = "") -> Any:
+        return await self._get(f"{AZURE_VNG}/{vng_id}", account_id=account_id)
 
     # --- Elastigroups ---
 
@@ -92,9 +188,12 @@ class SpotinstClient:
 
     # --- Ocean Nodes ---
 
-    async def get_cluster_nodes(self, cluster_id: str, account_id: str = "") -> Any:
+    async def get_cluster_nodes(
+        self, cluster_id: str, account_id: str = "", cloud: str = "aws"
+    ) -> Any:
+        prefix = AZURE_CLUSTER if cloud == "azure" else AWS_CLUSTER
         return await self._get(
-            f"/ocean/aws/k8s/cluster/{cluster_id}/nodes", account_id=account_id
+            f"{prefix}/{cluster_id}/nodes", account_id=account_id
         )
 
     # --- Ocean Costs ---
@@ -106,19 +205,25 @@ class SpotinstClient:
         end_time: str,
         group_by: str = "namespace",
         account_id: str = "",
+        cloud: str = "aws",
     ) -> Any:
         body = {
             "startTime": start_time,
             "endTime": end_time,
             "groupBy": group_by,
         }
+        # Azure costs use /ocean/azure/k8s/ (not /np/)
+        if cloud == "azure":
+            prefix = AZURE_COSTS_CLUSTER
+        else:
+            prefix = AWS_CLUSTER
         return await self._post(
-            f"/ocean/aws/k8s/cluster/{cluster_id}/aggregatedCosts",
+            f"{prefix}/{cluster_id}/aggregatedCosts",
             body,
             account_id=account_id,
         )
 
-    # --- Ocean Right-Sizing Suggestions ---
+    # --- Ocean Right-Sizing Suggestions (AWS only) ---
 
     async def get_right_sizing(
         self, cluster_id: str, namespace: str = "", account_id: str = ""
@@ -127,23 +232,31 @@ class SpotinstClient:
         if namespace:
             params["namespace"] = namespace
         return await self._get(
-            f"/ocean/aws/k8s/cluster/{cluster_id}/rightSizing/resourceSuggestion",
+            f"{AWS_CLUSTER}/{cluster_id}/rightSizing/resourceSuggestion",
             params,
             account_id=account_id,
         )
 
     # --- Ocean Rolls ---
 
-    async def list_rolls(self, cluster_id: str, account_id: str = "") -> Any:
+    async def list_rolls(
+        self, cluster_id: str, account_id: str = "", cloud: str = "aws"
+    ) -> Any:
+        prefix = AZURE_CLUSTER if cloud == "azure" else AWS_CLUSTER
         return await self._get(
-            f"/ocean/aws/k8s/cluster/{cluster_id}/roll", account_id=account_id
+            f"{prefix}/{cluster_id}/roll", account_id=account_id
         )
 
     async def get_roll(
-        self, cluster_id: str, roll_id: str, account_id: str = ""
+        self,
+        cluster_id: str,
+        roll_id: str,
+        account_id: str = "",
+        cloud: str = "aws",
     ) -> Any:
+        prefix = AZURE_CLUSTER if cloud == "azure" else AWS_CLUSTER
         return await self._get(
-            f"/ocean/aws/k8s/cluster/{cluster_id}/roll/{roll_id}",
+            f"{prefix}/{cluster_id}/roll/{roll_id}",
             account_id=account_id,
         )
 
@@ -157,6 +270,7 @@ class SpotinstClient:
         severity: str = "ALL",
         limit: int = 500,
         account_id: str = "",
+        cloud: str = "aws",
     ) -> Any:
         params = {
             "fromDate": from_date,
@@ -164,19 +278,20 @@ class SpotinstClient:
             "severity": severity,
             "limit": str(limit),
         }
+        prefix = AZURE_CLUSTER if cloud == "azure" else AWS_CLUSTER
         return await self._get(
-            f"/ocean/aws/k8s/cluster/{cluster_id}/log",
+            f"{prefix}/{cluster_id}/log",
             params,
             account_id=account_id,
         )
 
-    # --- Allowed Instance Types ---
+    # --- Allowed Instance Types (AWS only) ---
 
     async def get_allowed_instance_types(
         self, cluster_id: str, account_id: str = ""
     ) -> Any:
         return await self._get(
-            f"/ocean/aws/k8s/cluster/{cluster_id}/allowedInstanceTypes",
+            f"{AWS_CLUSTER}/{cluster_id}/allowedInstanceTypes",
             account_id=account_id,
         )
 

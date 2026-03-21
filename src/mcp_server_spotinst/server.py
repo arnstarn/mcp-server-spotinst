@@ -30,12 +30,24 @@ async def list_accounts() -> str:
     return _format(result)
 
 
-# --- Ocean Clusters ---
+# --- All Clusters (cross-account, cross-cloud) ---
+
+
+@mcp.tool()
+async def list_all_clusters() -> str:
+    """List ALL Ocean clusters across ALL accounts and cloud providers (AWS + Azure).
+    Scans every account in parallel and returns a unified list with account and cloud info.
+    """
+    clusters = await _get_client().list_all_clusters()
+    return _format(clusters)
+
+
+# --- Ocean Clusters (AWS) ---
 
 
 @mcp.tool()
 async def list_clusters(account_id: str = "") -> str:
-    """List all Ocean Kubernetes clusters in a Spotinst account.
+    """List AWS Ocean Kubernetes clusters in a Spotinst account.
 
     Args:
         account_id: Optional account ID to query (e.g. act-be5e7ffe). Defaults to SPOTINST_ACCOUNT_ID env var.
@@ -46,7 +58,7 @@ async def list_clusters(account_id: str = "") -> str:
 
 @mcp.tool()
 async def get_cluster(cluster_id: str, account_id: str = "") -> str:
-    """Get details of a specific Ocean cluster.
+    """Get details of a specific AWS Ocean cluster.
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
@@ -56,12 +68,38 @@ async def get_cluster(cluster_id: str, account_id: str = "") -> str:
     return _format(result)
 
 
-# --- Ocean VNGs (Launch Specs) ---
+# --- Ocean Clusters (Azure) ---
+
+
+@mcp.tool()
+async def list_clusters_azure(account_id: str = "") -> str:
+    """List Azure Ocean clusters in a Spotinst account.
+
+    Args:
+        account_id: Account ID for an Azure account (e.g. act-9785011e).
+    """
+    result = await _get_client().list_clusters_azure(account_id)
+    return _format(result)
+
+
+@mcp.tool()
+async def get_cluster_azure(cluster_id: str, account_id: str = "") -> str:
+    """Get details of a specific Azure Ocean cluster.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-390ef886)
+        account_id: Account ID for an Azure account.
+    """
+    result = await _get_client().get_cluster_azure(cluster_id, account_id)
+    return _format(result)
+
+
+# --- Ocean VNGs (AWS) ---
 
 
 @mcp.tool()
 async def list_vngs(ocean_id: str = "", account_id: str = "") -> str:
-    """List Ocean Virtual Node Groups (VNGs / launch specs).
+    """List AWS Ocean Virtual Node Groups (VNGs / launch specs).
 
     Args:
         ocean_id: Optional Ocean cluster ID to filter by (e.g. o-abc12345)
@@ -73,13 +111,40 @@ async def list_vngs(ocean_id: str = "", account_id: str = "") -> str:
 
 @mcp.tool()
 async def get_vng(vng_id: str, account_id: str = "") -> str:
-    """Get details of a specific VNG (launch spec).
+    """Get details of a specific AWS VNG (launch spec).
 
     Args:
         vng_id: The VNG/launch spec ID (e.g. ols-abc12345)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
     """
     result = await _get_client().get_vng(vng_id, account_id)
+    return _format(result)
+
+
+# --- Ocean VNGs (Azure) ---
+
+
+@mcp.tool()
+async def list_vngs_azure(ocean_id: str = "", account_id: str = "") -> str:
+    """List Azure Ocean Virtual Node Groups.
+
+    Args:
+        ocean_id: Optional Ocean cluster ID to filter by (e.g. o-390ef886)
+        account_id: Account ID for an Azure account.
+    """
+    result = await _get_client().list_vngs_azure(ocean_id or None, account_id)
+    return _format(result)
+
+
+@mcp.tool()
+async def get_vng_azure(vng_id: str, account_id: str = "") -> str:
+    """Get details of a specific Azure VNG.
+
+    Args:
+        vng_id: The VNG ID (e.g. vng-14e08b61)
+        account_id: Account ID for an Azure account.
+    """
+    result = await _get_client().get_vng_azure(vng_id, account_id)
     return _format(result)
 
 
@@ -113,14 +178,17 @@ async def get_elastigroup(group_id: str, account_id: str = "") -> str:
 
 
 @mcp.tool()
-async def get_cluster_nodes(cluster_id: str, account_id: str = "") -> str:
-    """List all nodes in an Ocean cluster.
+async def get_cluster_nodes(
+    cluster_id: str, account_id: str = "", cloud: str = "aws"
+) -> str:
+    """List all nodes in an Ocean cluster (AWS or Azure).
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
     """
-    result = await _get_client().get_cluster_nodes(cluster_id, account_id)
+    result = await _get_client().get_cluster_nodes(cluster_id, account_id, cloud)
     return _format(result)
 
 
@@ -134,8 +202,9 @@ async def get_cluster_costs(
     end_time: str,
     group_by: str = "namespace",
     account_id: str = "",
+    cloud: str = "aws",
 ) -> str:
-    """Get aggregated cost breakdown for an Ocean cluster over a date range.
+    """Get aggregated cost breakdown for an Ocean cluster (AWS or Azure).
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
@@ -143,21 +212,22 @@ async def get_cluster_costs(
         end_time: End time in ISO 8601 format (e.g. 2026-03-20T00:00:00Z)
         group_by: Group costs by: namespace or resource (default: namespace)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
     """
     result = await _get_client().get_cluster_costs(
-        cluster_id, start_time, end_time, group_by, account_id
+        cluster_id, start_time, end_time, group_by, account_id, cloud
     )
     return _format(result)
 
 
-# --- Ocean Right-Sizing ---
+# --- Ocean Right-Sizing (AWS only) ---
 
 
 @mcp.tool()
 async def get_right_sizing(
     cluster_id: str, namespace: str = "", account_id: str = ""
 ) -> str:
-    """Get right-sizing resource suggestions for workloads in an Ocean cluster.
+    """Get right-sizing resource suggestions for workloads in an AWS Ocean cluster.
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
@@ -172,27 +242,33 @@ async def get_right_sizing(
 
 
 @mcp.tool()
-async def list_rolls(cluster_id: str, account_id: str = "") -> str:
-    """List all deployment rolls for an Ocean cluster.
+async def list_rolls(
+    cluster_id: str, account_id: str = "", cloud: str = "aws"
+) -> str:
+    """List all deployment rolls for an Ocean cluster (AWS or Azure).
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
     """
-    result = await _get_client().list_rolls(cluster_id, account_id)
+    result = await _get_client().list_rolls(cluster_id, account_id, cloud)
     return _format(result)
 
 
 @mcp.tool()
-async def get_roll(cluster_id: str, roll_id: str, account_id: str = "") -> str:
-    """Get details of a specific Ocean cluster roll.
+async def get_roll(
+    cluster_id: str, roll_id: str, account_id: str = "", cloud: str = "aws"
+) -> str:
+    """Get details of a specific Ocean cluster roll (AWS or Azure).
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         roll_id: The roll ID (e.g. scr-abc12345)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
     """
-    result = await _get_client().get_roll(cluster_id, roll_id, account_id)
+    result = await _get_client().get_roll(cluster_id, roll_id, account_id, cloud)
     return _format(result)
 
 
@@ -207,8 +283,9 @@ async def get_cluster_log(
     severity: str = "ALL",
     limit: int = 500,
     account_id: str = "",
+    cloud: str = "aws",
 ) -> str:
-    """Get scaling and activity log events for an Ocean cluster.
+    """Get scaling and activity log events for an Ocean cluster (AWS or Azure).
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
@@ -217,21 +294,22 @@ async def get_cluster_log(
         severity: Filter by severity: ALL, INFO, WARN, ERROR (default: ALL)
         limit: Max number of log entries (default: 500)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
     """
     result = await _get_client().get_cluster_log(
-        cluster_id, from_date, to_date, severity, limit, account_id
+        cluster_id, from_date, to_date, severity, limit, account_id, cloud
     )
     return _format(result)
 
 
-# --- Allowed Instance Types ---
+# --- Allowed Instance Types (AWS only) ---
 
 
 @mcp.tool()
 async def get_allowed_instance_types(
     cluster_id: str, account_id: str = ""
 ) -> str:
-    """Get the list of allowed EC2 instance types for an Ocean cluster.
+    """Get the list of allowed EC2 instance types for an AWS Ocean cluster.
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
