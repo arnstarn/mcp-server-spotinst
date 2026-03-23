@@ -168,32 +168,37 @@ class SpotinstClient:
             else:
                 results[name] = f"error ({resp.status_code})"
 
-        # Write probes — use real resource IDs with invalid bodies.
-        # The API must resolve the resource before checking permissions,
-        # so fake IDs get 404 without ever checking write access.
-        # With a real ID: 403 = denied, 400 = has permission (bad body).
+        # Write probes — use real resource IDs with valid-looking bodies.
+        # The API may return 403 for denied OR embed permission errors in
+        # the response body with a 400/401 status. We check both the HTTP
+        # status code and the response body for permission-related messages.
+        _PERM_KEYWORDS = ("not allowed", "not permitted", "unauthorized", "forbidden", "no permission")
         write_probes: dict[str, tuple[str, str, dict[str, Any]]] = {}
         if real_cluster_id:
             write_probes["write_roll"] = (
-                "POST", f"{AWS_CLUSTER}/{real_cluster_id}/roll", {"roll": {}}
+                "POST", f"{AWS_CLUSTER}/{real_cluster_id}/roll",
+                {"roll": {"batchSizePercentage": 1, "instanceIds": ["i-probe00000000000"]}},
             )
             write_probes["write_detach"] = (
                 "PUT", f"{AWS_CLUSTER}/{real_cluster_id}/detachInstances",
-                {"instancesToDetach": []},
+                {
+                    "instancesToDetach": ["i-probe00000000000"],
+                    "shouldDecrementTargetCapacity": False,
+                    "shouldTerminateInstances": False,
+                },
             )
-        if real_vng_id:
-            write_probes["write_update_vng"] = (
-                "PUT", f"{AWS_VNG}/{real_vng_id}", {"launchSpec": {}}
-            )
+        # VNG update probe omitted — no safe way to send a valid body
+        # without risking actual mutation on read-write tokens.
 
-        # Probe writes (dry-run: real IDs, invalid bodies — nothing mutates)
         for name, (method, path, body) in write_probes.items():
             resp = await self._client.request(method, path, params=params, json=body)
+            body_text = resp.text.lower()
             if resp.status_code in (401, 403):
                 results[name] = "denied"
+            elif any(kw in body_text for kw in _PERM_KEYWORDS):
+                results[name] = "denied"
             else:
-                # 400 = token has permission, body was just invalid
-                results[name] = "ok (dry-run)"
+                results[name] = f"ok (dry-run, status {resp.status_code})"
 
         if not write_probes:
             results["write_probe"] = "skipped (no resources found to probe against)"
