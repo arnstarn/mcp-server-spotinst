@@ -284,3 +284,296 @@ async def test_get_cost_trending(client: SpotinstClient):
     result = await client.get_cost_trending("o-abc123", periods=2, period_days=7)
     assert len(result) == 2
     assert "period" in result[0]
+
+
+# --- Additional coverage ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_safe_returns_none_on_400(client: SpotinstClient):
+    """_get_safe should return None on 400 instead of raising."""
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster").mock(
+        return_value=httpx.Response(400, json={"error": "bad request"})
+    )
+    result = await client._get_safe("/ocean/aws/k8s/cluster")
+    assert result is None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_safe_returns_none_on_404(client: SpotinstClient):
+    """_get_safe should return None on 404."""
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-missing").mock(
+        return_value=httpx.Response(404, json={"error": "not found"})
+    )
+    result = await client._get_safe("/ocean/aws/k8s/cluster/o-missing")
+    assert result is None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_post_safe_returns_none_on_400(client: SpotinstClient):
+    """_post_safe should return None on 400."""
+    respx.post("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc/aggregatedCosts").mock(
+        return_value=httpx.Response(400, json={"error": "bad request"})
+    )
+    result = await client._post_safe("/ocean/aws/k8s/cluster/o-abc/aggregatedCosts", {"startTime": "x", "endTime": "y"})
+    assert result is None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_vng(client: SpotinstClient):
+    vng = [{"id": "ols-abc", "name": "gpu", "oceanId": "o-abc123", "instanceTypes": ["g4dn.xlarge"]}]
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/launchSpec/ols-abc").mock(
+        return_value=httpx.Response(200, json=_api_response(vng))
+    )
+    result = await client.get_vng("ols-abc")
+    assert result["items"][0]["name"] == "gpu"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_vng_azure(client: SpotinstClient):
+    vng = [{"id": "vng-abc", "name": "pool1"}]
+    respx.get("https://api.spotinst.io/ocean/azure/np/virtualNodeGroup/vng-abc").mock(
+        return_value=httpx.Response(200, json=_api_response(vng))
+    )
+    result = await client.get_vng_azure("vng-abc")
+    assert result["items"][0]["id"] == "vng-abc"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_cluster_azure(client: SpotinstClient):
+    cluster = [{"id": "o-az1", "name": "azure-prod", "aks": {"clusterName": "prod"}}]
+    respx.get("https://api.spotinst.io/ocean/azure/np/cluster/o-az1").mock(
+        return_value=httpx.Response(200, json=_api_response(cluster))
+    )
+    result = await client.get_cluster_azure("o-az1")
+    assert result["items"][0]["aks"]["clusterName"] == "prod"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_elastigroups(client: SpotinstClient):
+    groups = [{"id": "sig-abc", "name": "web-servers", "capacity": {"minimum": 1, "maximum": 10}}]
+    respx.get("https://api.spotinst.io/aws/ec2/group").mock(
+        return_value=httpx.Response(200, json=_api_response(groups))
+    )
+    result = await client.list_elastigroups()
+    assert result["items"][0]["id"] == "sig-abc"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_elastigroup(client: SpotinstClient):
+    group = [{"id": "sig-abc", "name": "web-servers", "region": "us-east-1"}]
+    respx.get("https://api.spotinst.io/aws/ec2/group/sig-abc").mock(
+        return_value=httpx.Response(200, json=_api_response(group))
+    )
+    result = await client.get_elastigroup("sig-abc")
+    assert result["items"][0]["region"] == "us-east-1"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_right_sizing(client: SpotinstClient):
+    suggestions = [{"namespace": "default", "containers": [{"name": "app", "suggestedCpu": 0.5}]}]
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/rightSizing/resourceSuggestion").mock(
+        return_value=httpx.Response(200, json=_api_response(suggestions))
+    )
+    result = await client.get_right_sizing("o-abc123")
+    assert result["items"][0]["namespace"] == "default"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_right_sizing_with_namespace(client: SpotinstClient):
+    suggestions = [{"namespace": "kube-system", "containers": []}]
+    route = respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/rightSizing/resourceSuggestion").mock(
+        return_value=httpx.Response(200, json=_api_response(suggestions))
+    )
+    await client.get_right_sizing("o-abc123", namespace="kube-system")
+    assert route.calls[0].request.url.params["namespace"] == "kube-system"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_roll(client: SpotinstClient):
+    roll = [{"id": "scr-abc", "status": "COMPLETED", "progress": {"value": 100}}]
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/roll/scr-abc").mock(
+        return_value=httpx.Response(200, json=_api_response(roll))
+    )
+    result = await client.get_roll("o-abc123", "scr-abc")
+    assert result["items"][0]["progress"]["value"] == 100
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_allowed_instance_types(client: SpotinstClient):
+    types = [{"instanceTypes": ["c5.xlarge", "m5.large", "r5.large"]}]
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/allowedInstanceTypes").mock(
+        return_value=httpx.Response(200, json=_api_response(types))
+    )
+    result = await client.get_allowed_instance_types("o-abc123")
+    assert "c5.xlarge" in result["items"][0]["instanceTypes"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_detach_instances(client: SpotinstClient):
+    route = respx.put("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/detachInstances").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    await client.detach_instances("o-abc123", ["i-abc", "i-def"], should_terminate_instances=True)
+    body = route.calls[0].request.content
+    import json
+    parsed = json.loads(body)
+    assert parsed["instancesToDetach"] == ["i-abc", "i-def"]
+    assert parsed["shouldTerminateInstances"] is True
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_update_vng(client: SpotinstClient):
+    route = respx.put("https://api.spotinst.io/ocean/aws/k8s/launchSpec/ols-abc").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "ols-abc"}]))
+    )
+    await client.update_vng("ols-abc", {"resourceLimits": {"maxInstanceCount": 20}})
+    import json
+    parsed = json.loads(route.calls[0].request.content)
+    assert parsed["launchSpec"]["resourceLimits"]["maxInstanceCount"] == 20
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_update_vng_azure(client: SpotinstClient):
+    route = respx.put("https://api.spotinst.io/ocean/azure/np/virtualNodeGroup/vng-abc").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "vng-abc"}]))
+    )
+    await client.update_vng_azure("vng-abc", {"maxCount": 10})
+    import json
+    parsed = json.loads(route.calls[0].request.content)
+    assert parsed["maxCount"] == 10
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_cluster_health_degraded(client: SpotinstClient):
+    """Health should be DEGRADED when there are many errors."""
+    logs = [{"message": f"Error {i}", "severity": "ERROR"} for i in range(10)]
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/nodes").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/log").mock(
+        return_value=httpx.Response(200, json=_api_response(logs))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/roll").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    result = await client.get_cluster_health("o-abc123")
+    assert result["health"] == "DEGRADED"
+    assert result["logs_24h"]["errors"] == 10
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_cluster_health_degraded_active_roll(client: SpotinstClient):
+    """Health should be DEGRADED when there's an active roll."""
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/nodes").mock(
+        return_value=httpx.Response(200, json=_api_response([{"instanceId": "i-1", "lifeCycle": "Spot"}]))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/log").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/roll").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "scr-1", "status": "IN_PROGRESS"}]))
+    )
+    result = await client.get_cluster_health("o-abc123")
+    assert result["health"] == "DEGRADED"
+    assert result["rolls"]["active"] == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_cost_trending_handles_400_gracefully(client: SpotinstClient):
+    """Cost trending should return 'no data' for periods that 400."""
+    call_count = 0
+
+    def _side_effect(request):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(200, json=_api_response([{"result": {"total": 100}}]))
+        return httpx.Response(400, json={"error": "no data"})
+
+    respx.post(url__regex=r".*/aggregatedCosts").mock(side_effect=_side_effect)
+    result = await client.get_cost_trending("o-abc123", periods=2, period_days=7)
+    assert len(result) == 2
+    has_data = sum(1 for r in result if r.get("data") is not None)
+    has_none = sum(1 for r in result if r.get("note") is not None)
+    assert has_data == 1
+    assert has_none == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_rolls_azure(client: SpotinstClient):
+    rolls = [{"id": "scr-az1", "status": "COMPLETED"}]
+    respx.get("https://api.spotinst.io/ocean/azure/np/cluster/o-az1/roll").mock(
+        return_value=httpx.Response(200, json=_api_response(rolls))
+    )
+    result = await client.list_rolls("o-az1", cloud="azure")
+    assert result["items"][0]["id"] == "scr-az1"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_roll_azure(client: SpotinstClient):
+    roll = [{"id": "scr-az1", "status": "IN_PROGRESS"}]
+    respx.get("https://api.spotinst.io/ocean/azure/np/cluster/o-az1/roll/scr-az1").mock(
+        return_value=httpx.Response(200, json=_api_response(roll))
+    )
+    result = await client.get_roll("o-az1", "scr-az1", cloud="azure")
+    assert result["items"][0]["status"] == "IN_PROGRESS"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_cluster_log_azure(client: SpotinstClient):
+    logs = [{"message": "Azure scale up", "severity": "INFO"}]
+    respx.get("https://api.spotinst.io/ocean/azure/np/cluster/o-az1/log").mock(
+        return_value=httpx.Response(200, json=_api_response(logs))
+    )
+    result = await client.get_cluster_log("o-az1", "2026-03-20", "2026-03-20", cloud="azure")
+    assert result["items"][0]["message"] == "Azure scale up"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_initiate_roll_azure(client: SpotinstClient):
+    respx.post("https://api.spotinst.io/ocean/azure/np/cluster/o-az1/roll").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "scr-az", "status": "IN_PROGRESS"}]))
+    )
+    result = await client.initiate_roll("o-az1", cloud="azure")
+    assert result["items"][0]["status"] == "IN_PROGRESS"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_initiate_roll_with_filters(client: SpotinstClient):
+    """Verify launch_spec_ids and instance_ids are included in the request body."""
+    route = respx.post("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/roll").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "scr-new"}]))
+    )
+    await client.initiate_roll(
+        "o-abc123",
+        launch_spec_ids=["ols-abc"],
+        instance_ids=["i-123"],
+    )
+    import json
+    body = json.loads(route.calls[0].request.content)
+    assert body["roll"]["launchSpecIds"] == ["ols-abc"]
+    assert body["roll"]["instanceIds"] == ["i-123"]

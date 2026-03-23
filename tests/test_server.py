@@ -1,8 +1,18 @@
 """Tests for the MCP server tool registration and safety guards."""
 
+import json
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
-from mcp_server_spotinst.server import mcp, remove_instances
+from mcp_server_spotinst.server import (
+    export_cluster_yaml,
+    filter_clusters_by_tag,
+    filter_vngs_by_tag,
+    get_cluster_scheduling,
+    mcp,
+    remove_instances,
+)
 
 
 def test_all_tools_registered():
@@ -90,3 +100,98 @@ async def test_remove_instances_no_ids():
     result = await remove_instances("o-abc123", "", strategy="replace")
     assert "ERROR" in result
     assert "No instance IDs" in result
+
+
+@pytest.mark.asyncio
+async def test_remove_instances_default_strategy():
+    """remove_instances defaults to drain_and_replace when no strategy given."""
+    result = await remove_instances("o-abc123", "i-abc", confirm=False)
+    assert "DRAIN AND REPLACE" in result
+
+
+@pytest.mark.asyncio
+async def test_filter_clusters_by_tag_matches():
+    """filter_clusters_by_tag should match clusters with matching tags."""
+    mock_resp = {
+        "items": [
+            {"id": "o-1", "name": "prod", "tags": [{"tagKey": "env", "tagValue": "production"}]},
+            {"id": "o-2", "name": "dev", "tags": [{"tagKey": "env", "tagValue": "development"}]},
+            {"id": "o-3", "name": "staging", "tags": []},
+        ]
+    }
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_clusters = AsyncMock(return_value=mock_resp)
+        result = await filter_clusters_by_tag("env", "production")
+        parsed = json.loads(result)
+        assert parsed["matched"] == 1
+        assert parsed["clusters"][0]["id"] == "o-1"
+
+
+@pytest.mark.asyncio
+async def test_filter_clusters_by_tag_key_only():
+    """filter_clusters_by_tag with no value matches any value for that key."""
+    mock_resp = {
+        "items": [
+            {"id": "o-1", "tags": [{"tagKey": "team", "tagValue": "infra"}]},
+            {"id": "o-2", "tags": [{"tagKey": "team", "tagValue": "ml"}]},
+            {"id": "o-3", "tags": [{"tagKey": "other", "tagValue": "x"}]},
+        ]
+    }
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_clusters = AsyncMock(return_value=mock_resp)
+        result = await filter_clusters_by_tag("team")
+        parsed = json.loads(result)
+        assert parsed["matched"] == 2
+
+
+@pytest.mark.asyncio
+async def test_filter_vngs_by_tag_matches():
+    """filter_vngs_by_tag should match VNGs with matching tags."""
+    mock_resp = {
+        "items": [
+            {"id": "ols-1", "tags": [{"tagKey": "workload", "tagValue": "gpu"}]},
+            {"id": "ols-2", "tags": [{"tagKey": "workload", "tagValue": "cpu"}]},
+        ]
+    }
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_vngs = AsyncMock(return_value=mock_resp)
+        result = await filter_vngs_by_tag("workload", "gpu")
+        parsed = json.loads(result)
+        assert parsed["matched"] == 1
+        assert parsed["vngs"][0]["id"] == "ols-1"
+
+
+@pytest.mark.asyncio
+async def test_export_cluster_yaml_format():
+    """export_cluster_yaml should return valid YAML."""
+    import yaml
+    mock_resp = {"items": [{"id": "o-abc", "name": "test", "region": "us-west-2", "autoScaler": {"isEnabled": True}}]}
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.get_cluster = AsyncMock(return_value=mock_resp)
+        result = await export_cluster_yaml("o-abc")
+        parsed = yaml.safe_load(result)
+        assert parsed["id"] == "o-abc"
+        assert parsed["autoScaler"]["isEnabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_cluster_scheduling_extracts_fields():
+    """get_cluster_scheduling should return only scheduling and autoScaler."""
+    mock_resp = {
+        "items": [{
+            "id": "o-abc",
+            "name": "test",
+            "region": "us-west-2",
+            "scheduling": {"shutdownHours": {"isEnabled": True, "timeWindows": ["Sat:00:00-Sun:23:59"]}},
+            "autoScaler": {"isEnabled": True, "cooldown": 300},
+            "compute": {"launchSpecification": {}},
+        }]
+    }
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.get_cluster_scheduling = AsyncMock(return_value=mock_resp)
+        result = await get_cluster_scheduling("o-abc")
+        parsed = json.loads(result)
+        assert "scheduling" in parsed
+        assert "autoScaler" in parsed
+        assert "compute" not in parsed
+        assert parsed["scheduling"]["shutdownHours"]["isEnabled"] is True

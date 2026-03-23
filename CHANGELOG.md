@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [0.2.0] - 2026-03-23
+
+### Added
+- **`remove_instances`** — Intent-based instance removal with 3 strategies:
+  - `drain_and_replace`: Graceful drain via rolling restart (safest, default)
+  - `replace`: Immediate terminate, Ocean auto-replaces (AWS only)
+  - `remove_permanently`: Terminate + reduce capacity, no replacement (AWS only)
+  - Shows full execution plan before `confirm=true`
+- **`get_cluster_health`** — Composite health check: node status, recent errors, active rolls
+- **`get_cost_trending`** — Week-over-week (or custom period) cost comparison
+- **`get_savings_summary`** — 30-day cost and savings summary
+- **`get_cluster_scheduling`** — Scheduling and auto-scaler configuration
+- **`list_stateful_nodes`** / **`get_stateful_node`** — AWS Managed Instances support
+- **`filter_clusters_by_tag`** / **`filter_vngs_by_tag`** — Tag-based filtering for clusters and VNGs
+- **`export_cluster_yaml`** / **`export_vng_yaml`** — Export configs as YAML for GitOps/backup
+- Dockerfile for containerized deployment
+- `pyyaml` dependency for YAML export
+
+### Fixed
+- Cost trending uses sequential API calls (Spot.io returns 400 on concurrent cost requests)
+- Mypy type stubs for PyYAML (`types-PyYAML`)
+
+## [0.1.0] - 2026-03-20
+
+### Added
+- Initial release with 23 tools (19 read + 4 write)
+- **Cross-account**: `list_accounts`, `list_all_clusters` (scans all accounts and clouds)
+- **AWS Ocean**: `list_clusters`, `get_cluster`, `list_vngs`, `get_vng`, `list_elastigroups`, `get_elastigroup`, `get_allowed_instance_types`, `get_right_sizing`
+- **Azure Ocean**: `list_clusters_azure`, `get_cluster_azure`, `list_vngs_azure`, `get_vng_azure`
+- **Both clouds**: `get_cluster_nodes`, `get_cluster_costs`, `list_rolls`, `get_roll`, `get_cluster_log`
+- **Write operations** (require `confirm=true`): `initiate_roll`, `detach_instances`, `update_vng`, `update_vng_azure`
+- Multi-account support via optional `account_id` parameter on all tools
+- CI with GitHub Actions (Python 3.10-3.13, ruff, mypy, pytest)
+- PyPI publishing via trusted publishers (OIDC)
+- MIT license
