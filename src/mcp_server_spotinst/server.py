@@ -22,6 +22,80 @@ def _format(data: object) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+def _truncate_items(data: dict, limit: int, sort_key=None, hint: str = "") -> dict:
+    """Truncate response items with metadata. limit=0 means no truncation."""
+    items = data.get("items", [])
+    if limit <= 0 or len(items) <= limit:
+        return data
+    if sort_key:
+        items = sorted(items, key=sort_key, reverse=True)
+    return {
+        **{k: v for k, v in data.items() if k != "items"},
+        "items": items[:limit],
+        "_truncated": True,
+        "_total_count": len(items),
+        "_showing": limit,
+        "_hint": hint or "Set limit=0 for all results.",
+    }
+
+
+_CLUSTER_SUMMARY_KEYS = ("id", "name", "controllerClusterId", "region", "state")
+_VNG_SUMMARY_KEYS = ("id", "name", "oceanId", "state")
+_ELASTIGROUP_SUMMARY_KEYS = ("id", "name", "region", "state")
+_STATEFUL_NODE_SUMMARY_KEYS = ("id", "name", "region", "state")
+
+
+def _summarize(item: dict, keys: tuple) -> dict:
+    """Extract summary fields from a resource for compact list responses."""
+    summary = {k: item[k] for k in keys if k in item}
+    if "aks" in item:
+        aks = item["aks"]
+        for k in ("name", "resourceGroupName"):
+            if k in aks:
+                summary[k] = aks[k]
+    summary.update({k: v for k, v in item.items() if k.startswith("_")})
+    if "capacity" in item:
+        summary["capacity"] = item["capacity"]
+    return summary
+
+
+def _with_summary_meta(items: list, resource_type: str) -> dict:
+    """Wrap summarized list response with progressive disclosure metadata."""
+    return {
+        "items": items,
+        "_summary": True,
+        "_hint": f"Showing compact summaries. Set verbose=true for full {resource_type} configs.",
+        "_verbose_when": (
+            f"Use verbose=true when you need to inspect networking, instance types, "
+            f"scaling settings, or troubleshoot {resource_type} configuration."
+        ),
+    }
+
+
+def _truncate_costs(data: dict, limit: int) -> dict:
+    """Truncate cost namespace aggregations by total cost descending."""
+    if limit <= 0:
+        return data
+    items = data.get("items", [])
+    if not items:
+        return data
+    detail = items[0] if isinstance(items, list) else items
+    aggs = detail.get("detailedCosts", {}).get("aggregations", {})
+    if not aggs or len(aggs) <= limit:
+        return data
+    total_count = len(aggs)
+    sorted_ns = sorted(aggs.items(), key=lambda kv: kv[1].get("summary", {}).get("total", 0), reverse=True)
+    truncated_aggs = dict(sorted_ns[:limit])
+    result = json.loads(json.dumps(data, default=str))
+    target = result["items"][0] if isinstance(result["items"], list) else result["items"]
+    target["detailedCosts"]["aggregations"] = truncated_aggs
+    result["_truncated"] = True
+    result["_total_count"] = total_count
+    result["_showing"] = limit
+    result["_hint"] = "Set limit=0 for all namespaces, or use namespace param to filter."
+    return result
+
+
 # --- Token Capabilities ---
 
 
@@ -49,11 +123,20 @@ async def list_accounts() -> str:
 
 
 @mcp.tool()
-async def list_all_clusters() -> str:
+async def list_all_clusters(verbose: bool = False) -> str:
     """List ALL Ocean clusters across ALL accounts and cloud providers (AWS + Azure).
     Scans every account in parallel and returns a unified list with account and cloud info.
+    Returns compact summaries by default (id, name, region, account, capacity).
+    Set verbose=true for full cluster configs (networking, instance types, autoscaler).
+
+    Args:
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing cluster settings, troubleshooting, or comparing configs.
     """
     clusters = await _get_client().list_all_clusters()
+    if not verbose:
+        items = [_summarize(c, _CLUSTER_SUMMARY_KEYS) for c in clusters]
+        return _format(_with_summary_meta(items, "cluster"))
     return _format(clusters)
 
 
@@ -61,13 +144,20 @@ async def list_all_clusters() -> str:
 
 
 @mcp.tool()
-async def list_clusters(account_id: str = "") -> str:
+async def list_clusters(account_id: str = "", verbose: bool = False) -> str:
     """List AWS Ocean Kubernetes clusters in a Spotinst account.
+    Returns compact summaries by default (id, name, region, capacity).
+    Set verbose=true for full cluster configs (networking, instance types, autoscaler).
 
     Args:
         account_id: Optional account ID to query (e.g. act-be5e7ffe). Defaults to SPOTINST_ACCOUNT_ID env var.
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing cluster settings, troubleshooting, or comparing configs.
     """
     result = await _get_client().list_clusters(account_id)
+    if not verbose:
+        items = [_summarize(c, _CLUSTER_SUMMARY_KEYS) for c in result.get("items", [])]
+        return _format(_with_summary_meta(items, "cluster"))
     return _format(result)
 
 
@@ -87,13 +177,20 @@ async def get_cluster(cluster_id: str, account_id: str = "") -> str:
 
 
 @mcp.tool()
-async def list_clusters_azure(account_id: str = "") -> str:
+async def list_clusters_azure(account_id: str = "", verbose: bool = False) -> str:
     """List Azure Ocean clusters in a Spotinst account.
+    Returns compact summaries by default (id, name, capacity).
+    Set verbose=true for full cluster configs (networking, VM sizes, autoscaler).
 
     Args:
         account_id: Account ID for an Azure account (e.g. act-9785011e).
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing cluster settings, troubleshooting, or comparing configs.
     """
     result = await _get_client().list_clusters_azure(account_id)
+    if not verbose:
+        items = [_summarize(c, _CLUSTER_SUMMARY_KEYS) for c in result.get("items", [])]
+        return _format(_with_summary_meta(items, "cluster"))
     return _format(result)
 
 
@@ -113,14 +210,21 @@ async def get_cluster_azure(cluster_id: str, account_id: str = "") -> str:
 
 
 @mcp.tool()
-async def list_vngs(ocean_id: str = "", account_id: str = "") -> str:
+async def list_vngs(ocean_id: str = "", account_id: str = "", verbose: bool = False) -> str:
     """List AWS Ocean Virtual Node Groups (VNGs / launch specs).
+    Returns compact summaries by default (id, name, oceanId).
+    Set verbose=true for full VNG configs (AMI, subnets, resource limits, labels).
 
     Args:
         ocean_id: Optional Ocean cluster ID to filter by (e.g. o-abc12345)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing VNG settings, troubleshooting, or comparing configs.
     """
     result = await _get_client().list_vngs(ocean_id or None, account_id)
+    if not verbose:
+        items = [_summarize(c, _VNG_SUMMARY_KEYS) for c in result.get("items", [])]
+        return _format(_with_summary_meta(items, "VNG"))
     return _format(result)
 
 
@@ -140,14 +244,21 @@ async def get_vng(vng_id: str, account_id: str = "") -> str:
 
 
 @mcp.tool()
-async def list_vngs_azure(ocean_id: str = "", account_id: str = "") -> str:
+async def list_vngs_azure(ocean_id: str = "", account_id: str = "", verbose: bool = False) -> str:
     """List Azure Ocean Virtual Node Groups.
+    Returns compact summaries by default (id, name, oceanId).
+    Set verbose=true for full VNG configs (VM sizes, labels, resource limits).
 
     Args:
         ocean_id: Optional Ocean cluster ID to filter by (e.g. o-390ef886)
         account_id: Account ID for an Azure account.
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing VNG settings, troubleshooting, or comparing configs.
     """
     result = await _get_client().list_vngs_azure(ocean_id or None, account_id)
+    if not verbose:
+        items = [_summarize(c, _VNG_SUMMARY_KEYS) for c in result.get("items", [])]
+        return _format(_with_summary_meta(items, "VNG"))
     return _format(result)
 
 
@@ -167,13 +278,20 @@ async def get_vng_azure(vng_id: str, account_id: str = "") -> str:
 
 
 @mcp.tool()
-async def list_elastigroups(account_id: str = "") -> str:
+async def list_elastigroups(account_id: str = "", verbose: bool = False) -> str:
     """List all Elastigroups in a Spotinst account.
+    Returns compact summaries by default (id, name, region, capacity).
+    Set verbose=true for full Elastigroup configs (compute, networking, scaling).
 
     Args:
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing Elastigroup settings, troubleshooting, or comparing configs.
     """
     result = await _get_client().list_elastigroups(account_id)
+    if not verbose:
+        items = [_summarize(c, _ELASTIGROUP_SUMMARY_KEYS) for c in result.get("items", [])]
+        return _format(_with_summary_meta(items, "Elastigroup"))
     return _format(result)
 
 
@@ -194,7 +312,7 @@ async def get_elastigroup(group_id: str, account_id: str = "") -> str:
 
 @mcp.tool()
 async def get_cluster_nodes(
-    cluster_id: str, account_id: str = "", cloud: str = "aws"
+    cluster_id: str, account_id: str = "", cloud: str = "aws", limit: int = 50
 ) -> str:
     """List all nodes in an Ocean cluster (AWS or Azure).
 
@@ -202,8 +320,10 @@ async def get_cluster_nodes(
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
         cloud: Cloud provider: aws or azure (default: aws)
+        limit: Max items to return (default: 50). Set limit=0 for all results.
     """
     result = await _get_client().get_cluster_nodes(cluster_id, account_id, cloud)
+    result = _truncate_items(result, limit, hint="Set limit=0 for all results.")
     return _format(result)
 
 
@@ -218,6 +338,7 @@ async def get_cluster_costs(
     group_by: str = "namespace",
     account_id: str = "",
     cloud: str = "aws",
+    limit: int = 50,
 ) -> str:
     """Get aggregated cost breakdown for an Ocean cluster (AWS or Azure).
 
@@ -225,13 +346,16 @@ async def get_cluster_costs(
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         start_time: Start time in ISO 8601 format (e.g. 2026-03-01T00:00:00Z)
         end_time: End time in ISO 8601 format (e.g. 2026-03-20T00:00:00Z)
-        group_by: Group costs by: namespace or resource (default: namespace)
+        group_by: Group costs by: namespace (default: namespace). Only 'namespace' is currently supported by the API.
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
         cloud: Cloud provider: aws or azure (default: aws)
+        limit: Max namespace aggregations to return, sorted by cost descending (default: 50). Set limit=0 for all.
     """
     result = await _get_client().get_cluster_costs(
         cluster_id, start_time, end_time, group_by, account_id, cloud
     )
+    # Truncate namespace aggregations by cost
+    result = _truncate_costs(result, limit)
     return _format(result)
 
 
@@ -240,21 +364,33 @@ async def get_cluster_costs(
 
 @mcp.tool()
 async def get_right_sizing(
-    cluster_id: str, namespace: str = "", account_id: str = "", cloud: str = "aws"
+    cluster_id: str, namespace: str = "", account_id: str = "", cloud: str = "aws", limit: int = 50
 ) -> str:
     """Get right-sizing resource suggestions for workloads in an Ocean cluster (AWS or Azure).
+    Results are sorted by savings potential (biggest CPU delta first) and truncated to `limit`.
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         namespace: Optional namespace to filter suggestions
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
         cloud: Cloud provider: aws or azure (default: aws)
+        limit: Max items to return, sorted by savings potential (default: 50). Set limit=0 for all results.
     """
     client = _get_client()
     if cloud == "azure":
         result = await client.get_right_sizing_azure(cluster_id, namespace, account_id)
     else:
         result = await client.get_right_sizing(cluster_id, namespace, account_id)
+
+    def _cpu_delta(item: dict) -> float:
+        requested = item.get("requestedCPU", 0) or item.get("requestedCpu", 0) or 0
+        suggested = item.get("suggestedCPU", 0) or item.get("suggestedCpu", 0) or 0
+        return float(requested) - float(suggested)
+
+    result = _truncate_items(
+        result, limit, sort_key=_cpu_delta,
+        hint="Set limit=0 for all results, or use namespace param to filter.",
+    )
     return _format(result)
 
 
@@ -343,13 +479,20 @@ async def get_allowed_instance_types(
 
 
 @mcp.tool()
-async def list_stateful_nodes(account_id: str = "") -> str:
+async def list_stateful_nodes(account_id: str = "", verbose: bool = False) -> str:
     """List all Stateful Nodes (Managed Instances) in an AWS account.
+    Returns compact summaries by default (id, name, region, capacity).
+    Set verbose=true for full configs (compute, networking, persistence).
 
     Args:
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing node settings, troubleshooting, or comparing configs.
     """
     result = await _get_client().list_stateful_nodes(account_id)
+    if not verbose:
+        items = [_summarize(c, _STATEFUL_NODE_SUMMARY_KEYS) for c in result.get("items", [])]
+        return _format(_with_summary_meta(items, "stateful node"))
     return _format(result)
 
 
@@ -369,13 +512,20 @@ async def get_stateful_node(node_id: str, account_id: str = "") -> str:
 
 
 @mcp.tool()
-async def list_stateful_nodes_azure(account_id: str = "") -> str:
+async def list_stateful_nodes_azure(account_id: str = "", verbose: bool = False) -> str:
     """List all Azure Stateful Nodes in an account.
+    Returns compact summaries by default (id, name, capacity).
+    Set verbose=true for full configs (compute, networking, persistence).
 
     Args:
         account_id: Account ID for an Azure account.
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing node settings, troubleshooting, or comparing configs.
     """
     result = await _get_client().list_stateful_nodes_azure(account_id)
+    if not verbose:
+        items = [_summarize(c, _STATEFUL_NODE_SUMMARY_KEYS) for c in result.get("items", [])]
+        return _format(_with_summary_meta(items, "stateful node"))
     return _format(result)
 
 
@@ -453,7 +603,7 @@ async def get_cost_trending(
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         periods: Number of time periods to compare (default: 4)
         period_days: Days per period (default: 7 for weekly)
-        group_by: Group costs by: namespace or resource (default: namespace)
+        group_by: Group costs by: namespace (default: namespace). Only 'namespace' is currently supported by the API.
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
         cloud: Cloud provider: aws or azure (default: aws)
     """
@@ -481,14 +631,19 @@ async def get_savings_summary(cluster_id: str, account_id: str = "", cloud: str 
 
 
 @mcp.tool()
-async def filter_clusters_by_tag(tag_key: str, tag_value: str = "", account_id: str = "", cloud: str = "aws") -> str:
+async def filter_clusters_by_tag(
+    tag_key: str, tag_value: str = "", account_id: str = "", cloud: str = "aws", verbose: bool = False
+) -> str:
     """Filter Ocean clusters by tag key (and optionally tag value). Works for AWS and Azure.
+    Returns compact summaries by default. Set verbose=true for full cluster configs.
 
     Args:
         tag_key: Tag key to filter by (e.g. environment, team)
         tag_value: Optional tag value to match (e.g. production). If empty, matches any value for the key.
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
         cloud: Cloud provider: aws or azure (default: aws)
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing cluster settings, troubleshooting, or comparing configs.
     """
     client = _get_client()
     if cloud == "azure":
@@ -511,14 +666,18 @@ async def filter_clusters_by_tag(tag_key: str, tag_value: str = "", account_id: 
         elif isinstance(tags, dict) and tag_key in tags:
             if not tag_value or tags[tag_key] == tag_value:
                 matched.append(c)
+    if not verbose:
+        matched = [_summarize(c, _CLUSTER_SUMMARY_KEYS) for c in matched]
     return _format({"matched": len(matched), "clusters": matched})
 
 
 @mcp.tool()
 async def filter_vngs_by_tag(
-    tag_key: str, tag_value: str = "", ocean_id: str = "", account_id: str = "", cloud: str = "aws"
+    tag_key: str, tag_value: str = "", ocean_id: str = "", account_id: str = "", cloud: str = "aws",
+    verbose: bool = False,
 ) -> str:
     """Filter VNGs by tag key (and optionally tag value). Works for AWS and Azure.
+    Returns compact summaries by default. Set verbose=true for full VNG configs.
 
     Args:
         tag_key: Tag key to filter by (e.g. team, workload-type)
@@ -526,6 +685,8 @@ async def filter_vngs_by_tag(
         ocean_id: Optional Ocean cluster ID to filter by
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
         cloud: Cloud provider: aws or azure (default: aws)
+        verbose: Return full configurations instead of compact summaries (default: false).
+                 Use when analyzing VNG settings, troubleshooting, or comparing configs.
     """
     client = _get_client()
     if cloud == "azure":
@@ -547,6 +708,8 @@ async def filter_vngs_by_tag(
         elif isinstance(tags, dict) and tag_key in tags:
             if not tag_value or tags[tag_key] == tag_value:
                 matched.append(v)
+    if not verbose:
+        matched = [_summarize(v, _VNG_SUMMARY_KEYS) for v in matched]
     return _format({"matched": len(matched), "vngs": matched})
 
 

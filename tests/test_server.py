@@ -6,12 +6,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mcp_server_spotinst.server import (
+    _truncate_items,
     export_cluster_yaml,
     filter_clusters_by_tag,
     filter_vngs_by_tag,
     get_cluster_scheduling,
     get_right_sizing,
+    list_all_clusters,
+    list_clusters,
     list_stateful_nodes_azure,
+    list_vngs,
     mcp,
     remove_instances,
 )
@@ -220,3 +224,225 @@ async def test_get_cluster_scheduling_extracts_fields():
         assert "autoScaler" in parsed
         assert "compute" not in parsed
         assert parsed["scheduling"]["shutdownHours"]["isEnabled"] is True
+
+
+def test_truncate_items_truncates_and_adds_metadata():
+    """_truncate_items should truncate and add metadata."""
+    data = {"items": [{"id": i} for i in range(100)]}
+    result = _truncate_items(data, 10)
+    assert len(result["items"]) == 10
+    assert result["_truncated"] is True
+    assert result["_total_count"] == 100
+    assert result["_showing"] == 10
+
+
+def test_truncate_items_no_truncation_when_under_limit():
+    """_truncate_items should not truncate when items <= limit."""
+    data = {"items": [{"id": 1}, {"id": 2}]}
+    result = _truncate_items(data, 10)
+    assert "_truncated" not in result
+    assert len(result["items"]) == 2
+
+
+def test_truncate_items_limit_zero_returns_all():
+    """_truncate_items with limit=0 should return all items."""
+    data = {"items": [{"id": i} for i in range(100)]}
+    result = _truncate_items(data, 0)
+    assert "_truncated" not in result
+    assert len(result["items"]) == 100
+
+
+def test_truncate_items_with_sort_key():
+    """_truncate_items should sort by sort_key before truncating."""
+    data = {"items": [{"id": i, "val": i} for i in range(10)]}
+    result = _truncate_items(data, 3, sort_key=lambda x: x["val"])
+    assert [item["val"] for item in result["items"]] == [9, 8, 7]
+
+
+@pytest.mark.asyncio
+async def test_get_right_sizing_truncation():
+    """get_right_sizing should truncate and sort by CPU delta."""
+    items = [
+        {"id": f"w-{i}", "requestedCPU": i * 100, "suggestedCPU": 50}
+        for i in range(10)
+    ]
+    mock_resp = {"items": items}
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.get_right_sizing = AsyncMock(return_value=mock_resp)
+        result = await get_right_sizing("o-abc", limit=3)
+        parsed = json.loads(result)
+        assert parsed["_truncated"] is True
+        assert parsed["_total_count"] == 10
+        assert parsed["_showing"] == 3
+        # Should be sorted by biggest CPU delta first (highest requestedCPU)
+        assert parsed["items"][0]["requestedCPU"] == 900
+
+
+@pytest.mark.asyncio
+async def test_get_right_sizing_limit_zero():
+    """get_right_sizing with limit=0 should return all items."""
+    items = [{"id": f"w-{i}", "requestedCPU": i * 100, "suggestedCPU": 50} for i in range(10)]
+    mock_resp = {"items": items}
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.get_right_sizing = AsyncMock(return_value=mock_resp)
+        result = await get_right_sizing("o-abc", limit=0)
+        parsed = json.loads(result)
+        assert "_truncated" not in parsed
+        assert len(parsed["items"]) == 10
+
+
+@pytest.mark.asyncio
+async def test_list_all_clusters_compact_by_default():
+    """list_all_clusters should return compact summaries by default."""
+    mock_clusters = [
+        {
+            "id": "o-abc123",
+            "name": "prod-cluster",
+            "controllerClusterId": "prod-k8s",
+            "region": "us-east-1",
+            "capacity": {"minimum": 1, "maximum": 10, "target": 3},
+            "_accountId": "act-111",
+            "_accountName": "Prod Account",
+            "_cloudProvider": "AWS",
+            "autoScaler": {"isEnabled": True, "cooldown": 300},
+            "compute": {"subnetIds": ["subnet-aaa"], "instanceTypes": {"whitelist": ["m5.xlarge"]}},
+            "strategy": {"spotPercentage": 80},
+        },
+        {
+            "id": "o-def456",
+            "name": "dev-azure",
+            "aks": {"name": "dev-aks", "resourceGroupName": "rg-dev"},
+            "capacity": {"minimum": 1, "maximum": 5, "target": 2},
+            "_accountId": "act-222",
+            "_accountName": "Dev Azure",
+            "_cloudProvider": "AZURE",
+            "autoScaler": {"isEnabled": False},
+            "virtualNodeGroupTemplate": {"big": "nested object"},
+        },
+    ]
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_all_clusters = AsyncMock(return_value=mock_clusters)
+        result = await list_all_clusters()
+        parsed = json.loads(result)
+        assert parsed["_summary"] is True
+        assert "verbose=true" in parsed["_hint"]
+        assert "_verbose_when" in parsed
+        assert len(parsed["items"]) == 2
+        # AWS cluster: core fields kept, bloat stripped
+        aws = parsed["items"][0]
+        assert aws["id"] == "o-abc123"
+        assert aws["_accountId"] == "act-111"
+        assert aws["region"] == "us-east-1"
+        assert aws["capacity"]["target"] == 3
+        assert "autoScaler" not in aws
+        assert "compute" not in aws
+        assert "strategy" not in aws
+        # Azure cluster: AKS fields extracted
+        azure = parsed["items"][1]
+        assert azure["id"] == "o-def456"
+        assert azure["_accountId"] == "act-222"
+        assert azure["resourceGroupName"] == "rg-dev"
+        assert "virtualNodeGroupTemplate" not in azure
+
+
+@pytest.mark.asyncio
+async def test_list_all_clusters_verbose_returns_full():
+    """list_all_clusters with verbose=True should return full configs."""
+    mock_clusters = [
+        {
+            "id": "o-abc123",
+            "name": "prod",
+            "_accountId": "act-111",
+            "_accountName": "Prod",
+            "_cloudProvider": "AWS",
+            "autoScaler": {"isEnabled": True},
+            "compute": {"subnetIds": ["subnet-aaa"]},
+        },
+    ]
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_all_clusters = AsyncMock(return_value=mock_clusters)
+        result = await list_all_clusters(verbose=True)
+        parsed = json.loads(result)
+        # Should be a flat list, no _summary metadata
+        assert isinstance(parsed, list)
+        assert "autoScaler" in parsed[0]
+        assert "compute" in parsed[0]
+
+
+@pytest.mark.asyncio
+async def test_list_clusters_compact():
+    """list_clusters should return compact summaries by default."""
+    mock_resp = {
+        "items": [
+            {
+                "id": "o-abc",
+                "name": "prod",
+                "region": "us-west-2",
+                "capacity": {"minimum": 1, "maximum": 10, "target": 3},
+                "autoScaler": {"isEnabled": True},
+                "compute": {"subnetIds": ["subnet-x"]},
+            },
+        ]
+    }
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_clusters = AsyncMock(return_value=mock_resp)
+        result = await list_clusters()
+        parsed = json.loads(result)
+        assert parsed["_summary"] is True
+        cluster = parsed["items"][0]
+        assert cluster["id"] == "o-abc"
+        assert cluster["region"] == "us-west-2"
+        assert "autoScaler" not in cluster
+        assert "compute" not in cluster
+
+
+@pytest.mark.asyncio
+async def test_list_vngs_compact():
+    """list_vngs should return compact summaries with oceanId."""
+    mock_resp = {
+        "items": [
+            {
+                "id": "ols-abc",
+                "name": "gpu-vng",
+                "oceanId": "o-123",
+                "imageId": "ami-xxx",
+                "resourceLimits": {"maxInstanceCount": 100},
+            },
+        ]
+    }
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_vngs = AsyncMock(return_value=mock_resp)
+        result = await list_vngs()
+        parsed = json.loads(result)
+        assert parsed["_summary"] is True
+        vng = parsed["items"][0]
+        assert vng["id"] == "ols-abc"
+        assert vng["oceanId"] == "o-123"
+        assert "imageId" not in vng
+        assert "resourceLimits" not in vng
+
+
+@pytest.mark.asyncio
+async def test_filter_clusters_by_tag_compact():
+    """filter_clusters_by_tag should return compact summaries by default."""
+    mock_resp = {
+        "items": [
+            {
+                "id": "o-1",
+                "name": "prod",
+                "region": "us-west-2",
+                "tags": [{"tagKey": "env", "tagValue": "production"}],
+                "autoScaler": {"isEnabled": True},
+                "compute": {"big": "data"},
+            },
+        ]
+    }
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_clusters = AsyncMock(return_value=mock_resp)
+        result = await filter_clusters_by_tag("env", "production")
+        parsed = json.loads(result)
+        assert parsed["matched"] == 1
+        cluster = parsed["clusters"][0]
+        assert cluster["id"] == "o-1"
+        assert "autoScaler" not in cluster
+        assert "compute" not in cluster

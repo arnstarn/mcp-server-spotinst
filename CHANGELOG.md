@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-03-23
+
+### Fixed
+- **`get_cluster_costs` / `get_cost_trending` docstring** — removed invalid `resource` option from `group_by` docs; only `namespace` is supported by the API
+
+### Added
+- **Smart response truncation** with `limit` parameter on tools that return large unbounded lists:
+  - **`get_right_sizing`** — sorted by savings potential (biggest CPU delta first), default top 50
+  - **`get_cluster_nodes`** — default 50
+  - **`get_cluster_costs`** — namespace aggregations sorted by cost descending, default top 50
+- `limit=0` disables truncation and returns all results (full opt-out)
+- Truncation metadata (`_truncated`, `_total_count`, `_showing`, `_hint`) added to responses so agents know when to adjust
+- **Compact summaries** for all list/filter tools — returns only essential fields (id, name, region, account, capacity) by default:
+  - `list_all_clusters`, `list_clusters`, `list_clusters_azure`
+  - `list_vngs`, `list_vngs_azure`, `list_elastigroups`
+  - `list_stateful_nodes`, `list_stateful_nodes_azure`
+  - `filter_clusters_by_tag`, `filter_vngs_by_tag`
+- `verbose=true` parameter on list/filter tools to opt-in to full configurations
+- Progressive disclosure metadata (`_summary`, `_hint`, `_verbose_when`) guides agents on when to request full configs
+
 ## [0.4.0] - 2026-03-23
 
 ### Added
