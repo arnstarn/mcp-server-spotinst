@@ -553,6 +553,118 @@ async def export_vng_yaml(vng_id: str, account_id: str = "", cloud: str = "aws")
 
 
 @mcp.tool()
+async def remove_instances(
+    cluster_id: str,
+    instance_ids: str,
+    strategy: str = "",
+    confirm: bool = False,
+    batch_size_percentage: int = 20,
+    account_id: str = "",
+    cloud: str = "aws",
+) -> str:
+    """DESTRUCTIVE: Remove instances from an Ocean cluster using a named strategy.
+    This is the RECOMMENDED tool for instance removal — it picks the right API call for you.
+    Requires confirm=true.
+
+    Strategies:
+      - "drain_and_replace": Gracefully drain pods (respects PDBs), terminate, Ocean replaces.
+        Uses rolling restart. SAFEST option for production. (Default if not specified)
+      - "replace": Immediately terminate instances, Ocean auto-scales replacements.
+        Faster but no graceful drain — pods are killed abruptly.
+      - "remove_permanently": Terminate instances AND reduce cluster capacity.
+        Instances are gone and NOT replaced. Use for downsizing.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        instance_ids: Comma-separated instance IDs (e.g. i-abc123,i-def456)
+        strategy: One of: drain_and_replace, replace, remove_permanently
+        confirm: Must be true to execute. Safety guard.
+        batch_size_percentage: For drain_and_replace only: % of nodes per batch (default: 20)
+        account_id: Optional account ID. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws). Note: replace and remove_permanently are AWS-only.
+    """
+    ids = [s.strip() for s in instance_ids.split(",") if s.strip()]
+    if not ids:
+        return "ERROR: No instance IDs provided."
+
+    valid_strategies = ("drain_and_replace", "replace", "remove_permanently")
+    if not strategy:
+        strategy = "drain_and_replace"
+    if strategy not in valid_strategies:
+        return (
+            f"ERROR: Invalid strategy '{strategy}'.\n"
+            f"Valid strategies:\n"
+            f"  - drain_and_replace: Graceful drain + terminate + Ocean replaces (safest)\n"
+            f"  - replace: Terminate immediately + Ocean replaces (no drain)\n"
+            f"  - remove_permanently: Terminate + reduce capacity (no replacement)"
+        )
+
+    # Build the plan description
+    if strategy == "drain_and_replace":
+        plan = (
+            f"DRAIN AND REPLACE {len(ids)} instance(s) in cluster {cluster_id}:\n"
+            f"  Instances: {ids}\n"
+            f"  Method: Rolling restart ({batch_size_percentage}% per batch)\n"
+            f"  - Pods will be gracefully drained (PDBs respected)\n"
+            f"  - Instances will be terminated after drain\n"
+            f"  - Ocean will automatically launch replacements"
+        )
+    elif strategy == "replace":
+        if cloud == "azure":
+            return "ERROR: 'replace' strategy is only available for AWS clusters. Use 'drain_and_replace' for Azure."
+        plan = (
+            f"REPLACE {len(ids)} instance(s) in cluster {cluster_id}:\n"
+            f"  Instances: {ids}\n"
+            f"  Method: Detach + terminate (immediate)\n"
+            f"  - Pods will be killed WITHOUT graceful drain\n"
+            f"  - Instances will be terminated immediately\n"
+            f"  - Ocean will automatically launch replacements"
+        )
+    else:  # remove_permanently
+        if cloud == "azure":
+            return "ERROR: 'remove_permanently' strategy is only available for AWS clusters."
+        plan = (
+            f"PERMANENTLY REMOVE {len(ids)} instance(s) from cluster {cluster_id}:\n"
+            f"  Instances: {ids}\n"
+            f"  Method: Detach + terminate + reduce capacity\n"
+            f"  - Pods will be killed WITHOUT graceful drain\n"
+            f"  - Instances will be terminated\n"
+            f"  - Cluster capacity will be REDUCED (no replacements)"
+        )
+
+    if not confirm:
+        return f"SAFETY: Action NOT executed. Set confirm=true to proceed.\n\n{plan}"
+
+    client = _get_client()
+    if strategy == "drain_and_replace":
+        result = await client.initiate_roll(
+            cluster_id,
+            batch_size_percentage=batch_size_percentage,
+            instance_ids=ids,
+            account_id=account_id,
+            cloud=cloud,
+        )
+    elif strategy == "replace":
+        result = await client.detach_instances(
+            cluster_id,
+            instance_ids=ids,
+            should_terminate_instances=True,
+            should_decrement_target_capacity=False,
+            account_id=account_id,
+        )
+    else:  # remove_permanently
+        result = await client.detach_instances(
+            cluster_id,
+            instance_ids=ids,
+            should_terminate_instances=True,
+            should_decrement_target_capacity=True,
+            account_id=account_id,
+        )
+
+    return f"EXECUTED: {strategy}\n\n{plan}\n\nResult:\n{_format(result)}"
+
+
+@mcp.tool()
 async def initiate_roll(
     cluster_id: str,
     confirm: bool = False,
