@@ -172,7 +172,10 @@ class SpotinstClient:
         # The API may return 403 for denied OR embed permission errors in
         # the response body with a 400/401 status. We check both the HTTP
         # status code and the response body for permission-related messages.
-        _PERM_KEYWORDS = ("not allowed", "not permitted", "unauthorized", "forbidden", "no permission")
+        _PERM_KEYWORDS = (
+            "not allowed", "not permitted", "unauthorized", "forbidden",
+            "no permission", "an unknown error occurred",
+        )
         write_probes: dict[str, tuple[str, str, dict[str, Any]]] = {}
         if real_cluster_id:
             write_probes["write_roll"] = (

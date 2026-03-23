@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-03-23
+
+### Added
+- **Write permission probing** in `probe_token_capabilities` — distinguishes read-only tokens from read+write tokens:
+  - Probes `roll` and `detach` endpoints using real cluster IDs with fake instance IDs (safe dry-run)
+  - Detects Spot.io's non-standard permission denials (400 "An unknown error occurred" instead of 403)
+  - Response now includes `read_access`, `write_access`, `write_denied` fields
+  - Recommendation summary: "full read + write", "read-only", or "partial write"
+- 4 new probe tests (82 total)
+
+### Changed
+- CI workflows bumped to `actions/checkout@v6` and `actions/setup-python@v6` (Node.js 24)
+
 ## [0.4.1] - 2026-03-23
 
 ### Fixed
