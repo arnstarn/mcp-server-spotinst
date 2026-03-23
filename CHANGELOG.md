@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-03-23
+
+### Added
+- **HTTP/SSE transport** — run as a remote server with `--transport sse` or `--transport streamable-http`
+  - Accepts `--host` and `--port` flags
+  - Dockerfile defaults to `streamable-http` on port 8000
+- 29 new tests (57 total) covering error handling, Azure paths, write operations, tag filtering, YAML export, and more
+
 ## [0.2.0] - 2026-03-23
 
 ### Added
