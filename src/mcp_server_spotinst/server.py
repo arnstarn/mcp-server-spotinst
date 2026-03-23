@@ -805,7 +805,24 @@ async def update_vng_azure(
 
 
 def main():
-    mcp.run()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MCP server for Spot.io (Spotinst) API")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default="stdio",
+        help="Transport protocol (default: stdio)",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind for HTTP transports (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind for HTTP transports (default: 8000)")
+    args = parser.parse_args()
+
+    if args.transport in ("sse", "streamable-http"):
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+
+    mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":

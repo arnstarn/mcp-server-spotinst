@@ -13,3 +13,4 @@ ENV SPOTINST_ACCOUNT_ID=""
 EXPOSE 8000
 
 ENTRYPOINT ["mcp-server-spotinst"]
+CMD ["--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]
