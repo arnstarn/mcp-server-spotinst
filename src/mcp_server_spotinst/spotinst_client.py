@@ -424,34 +424,30 @@ class SpotinstClient:
     ) -> list[dict[str, Any]]:
         """Get costs for multiple consecutive time periods for trending analysis."""
         now = datetime.now(timezone.utc)
-        results = []
 
         async def _fetch_period(i: int) -> dict[str, Any]:
             end = now - timedelta(days=i * period_days)
             start = end - timedelta(days=period_days)
-            try:
-                resp = await self.get_cluster_costs(
-                    cluster_id,
-                    start.strftime("%Y-%m-%dT00:00:00Z"),
-                    end.strftime("%Y-%m-%dT00:00:00Z"),
-                    group_by,
-                    account_id,
-                    cloud,
-                )
-                return {
-                    "period": f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}",
-                    "start": start.strftime("%Y-%m-%dT00:00:00Z"),
-                    "end": end.strftime("%Y-%m-%dT00:00:00Z"),
-                    "data": resp,
-                }
-            except Exception as e:
-                return {
-                    "period": f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}",
-                    "error": str(e),
-                }
+            start_str = start.strftime("%Y-%m-%dT00:00:00Z")
+            end_str = end.strftime("%Y-%m-%dT00:00:00Z")
+            period_label = f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}"
+            body = {"startTime": start_str, "endTime": end_str, "groupBy": group_by}
+            if cloud == "azure":
+                prefix = AZURE_COSTS_CLUSTER
+            else:
+                prefix = AWS_CLUSTER
+            resp = await self._post_safe(
+                f"{prefix}/{cluster_id}/aggregatedCosts", body, account_id=account_id
+            )
+            base = {"period": period_label, "start": start_str, "end": end_str}
+            if resp is None:
+                return {**base, "data": None, "note": "no data available for this period"}
+            return {**base, "data": resp}
 
-        tasks = [_fetch_period(i) for i in range(periods)]
-        results = await asyncio.gather(*tasks)
+        # Run sequentially — Spot.io costs API doesn't handle concurrent requests well
+        results: list[dict[str, Any]] = []
+        for i in range(periods):
+            results.append(await _fetch_period(i))
         return sorted(results, key=lambda x: x.get("start", ""))
 
     # --- Spot Savings ---

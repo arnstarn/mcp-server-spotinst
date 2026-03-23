@@ -278,7 +278,7 @@ async def test_get_cluster_health(client: SpotinstClient):
 async def test_get_cost_trending(client: SpotinstClient):
     """Verify cost trending fetches multiple periods."""
     costs = [{"result": {"totalForDuration": {"summary": {"total": 100.0}}}}]
-    respx.post(url__regex=r".*/aggregatedCosts$").mock(
+    respx.post(url__regex=r".*/aggregatedCosts").mock(
         return_value=httpx.Response(200, json=_api_response(costs))
     )
     result = await client.get_cost_trending("o-abc123", periods=2, period_days=7)
