@@ -628,12 +628,17 @@ async def test_put_raises_permission_error_on_403(client: SpotinstClient):
 @respx.mock
 @pytest.mark.asyncio
 async def test_probe_capabilities_full_access(client: SpotinstClient):
-    """Probe should report full access when all endpoints return 200."""
+    """Probe should report full read + write access when all endpoints succeed."""
     respx.get(url__regex=r".*").mock(return_value=httpx.Response(200, json=_api_response([])))
+    # Write probes return 400 (bad input) = has permission
+    respx.post(url__regex=r".*").mock(return_value=httpx.Response(400, json={"error": "bad request"}))
+    respx.put(url__regex=r".*").mock(return_value=httpx.Response(400, json={"error": "bad request"}))
     result = await client.probe_capabilities()
     assert result["token_valid"] is True
     assert len(result["denied"]) == 0
-    assert "full access" in result["recommendation"]
+    assert "full read + write" in result["recommendation"]
+    assert len(result["write_access"]) == 4
+    assert len(result["write_denied"]) == 0
 
 
 @respx.mock
@@ -664,12 +669,25 @@ async def test_probe_capabilities_partial_access(client: SpotinstClient):
     respx.get("https://api.spotinst.io/azure/compute/statefulNode").mock(
         return_value=httpx.Response(403, json={"error": "forbidden"})
     )
+    # Write probes: roll and detach ok, VNG updates denied
+    respx.post(url__regex=r".*").mock(return_value=httpx.Response(400, json={"error": "bad request"}))
+    respx.put(url__regex=r".*/detachInstances.*").mock(
+        return_value=httpx.Response(400, json={"error": "bad request"})
+    )
+    respx.put(url__regex=r".*/launchSpec/.*").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
+    respx.put(url__regex=r".*/virtualNodeGroup/.*").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
     result = await client.probe_capabilities()
     assert result["token_valid"] is True
     assert "azure_clusters" in result["denied"]
     assert "azure_vngs" in result["denied"]
     assert "stateful_nodes_azure" in result["denied"]
-    assert "lacks access" in result["recommendation"]
+    assert "write_update_vng" in result["write_denied"]
+    assert "write_update_vng_azure" in result["write_denied"]
+    assert "partial write" in result["recommendation"]
 
 
 @respx.mock
@@ -677,8 +695,26 @@ async def test_probe_capabilities_partial_access(client: SpotinstClient):
 async def test_probe_capabilities_invalid_token(client: SpotinstClient):
     """Probe should detect invalid token."""
     respx.get(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
+    respx.post(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
+    respx.put(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
     result = await client.probe_capabilities()
     assert result["token_valid"] is False
+    assert len(result["write_access"]) == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_capabilities_read_only_token(client: SpotinstClient):
+    """Probe should detect read-only token (reads ok, writes denied)."""
+    respx.get(url__regex=r".*").mock(return_value=httpx.Response(200, json=_api_response([])))
+    respx.post(url__regex=r".*").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+    respx.put(url__regex=r".*").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+    result = await client.probe_capabilities()
+    assert result["token_valid"] is True
+    assert len(result["read_access"]) == 8
+    assert len(result["write_access"]) == 0
+    assert len(result["write_denied"]) == 4
+    assert "read-only" in result["recommendation"]
 
 
 # --- Azure right-sizing ---

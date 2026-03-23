@@ -131,8 +131,9 @@ class SpotinstClient:
     # --- Token Capabilities ---
 
     async def probe_capabilities(self) -> dict[str, Any]:
-        """Probe which API endpoints the current token can access."""
-        probes = {
+        """Probe which API endpoints the current token can access (read + write dry-run)."""
+        # Read probes — GET requests
+        read_probes = {
             "accounts": "/setup/account",
             "aws_clusters": AWS_CLUSTER,
             "azure_clusters": AZURE_CLUSTER,
@@ -143,32 +144,64 @@ class SpotinstClient:
             "stateful_nodes_azure": "/azure/compute/statefulNode",
         }
 
+        # Write probes — use fake IDs so nothing actually happens.
+        # 403 = no write permission, 400/404 = has permission (bad input).
+        write_probes = {
+            "write_roll": ("POST", f"{AWS_CLUSTER}/o-fake000000/roll", {"roll": {}}),
+            "write_detach": ("PUT", f"{AWS_CLUSTER}/o-fake000000/detachInstances", {"instancesToDetach": []}),
+            "write_update_vng": ("PUT", f"{AWS_VNG}/ols-fake000000", {"launchSpec": {}}),
+            "write_update_vng_azure": ("PUT", f"{AZURE_VNG}/vng-fake000000", {}),
+        }
+
         results: dict[str, Any] = {}
-        for name, path in probes.items():
-            resp = await self._client.get(path, params=self._account_params())
+        params = self._account_params()
+
+        # Probe reads
+        for name, path in read_probes.items():
+            resp = await self._client.get(path, params=params)
             if resp.status_code == 200:
                 results[name] = "ok"
             elif resp.status_code in (401, 403):
                 results[name] = "denied"
             elif resp.status_code == 400:
-                # 400 usually means the endpoint exists but needs different params (e.g. wrong cloud)
                 results[name] = "ok (cloud mismatch or no resources)"
             else:
                 results[name] = f"error ({resp.status_code})"
 
+        # Probe writes (dry-run with fake IDs)
+        for name, (method, path, body) in write_probes.items():
+            resp = await self._client.request(method, path, params=params, json=body)
+            if resp.status_code in (401, 403):
+                results[name] = "denied"
+            else:
+                # 400, 404, etc. = token has permission, input was just invalid
+                results[name] = "ok (dry-run)"
+
         # Derive summary
         accessible = [k for k, v in results.items() if v.startswith("ok")]
         denied = [k for k, v in results.items() if v == "denied"]
+        read_ok = [k for k in read_probes if results.get(k, "").startswith("ok")]
+        write_ok = [k for k in write_probes if results.get(k, "").startswith("ok")]
+        write_denied = [k for k in write_probes if results.get(k) == "denied"]
+
+        if not denied:
+            recommendation = "Token has full read + write access."
+        elif write_denied and not write_ok:
+            recommendation = "Token is read-only. Write operations will be blocked."
+        elif write_denied:
+            recommendation = f"Token has partial write access. Denied: {', '.join(write_denied)}."
+        else:
+            recommendation = f"Token lacks access to: {', '.join(denied)}. Some tools will not work."
 
         return {
             "token_valid": results.get("accounts") != "denied",
             "accessible": accessible,
             "denied": denied,
+            "read_access": read_ok,
+            "write_access": write_ok,
+            "write_denied": write_denied,
             "details": results,
-            "recommendation": (
-                "Token has full access." if not denied
-                else f"Token lacks access to: {', '.join(denied)}. Some tools will not work."
-            ),
+            "recommendation": recommendation,
         }
 
     # --- Accounts ---
