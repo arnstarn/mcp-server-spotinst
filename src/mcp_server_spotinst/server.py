@@ -22,6 +22,19 @@ def _format(data: object) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+# --- Token Capabilities ---
+
+
+@mcp.tool()
+async def probe_token_capabilities() -> str:
+    """Probe which Spot.io API endpoints the current token can access.
+    Call this first to understand what tools will work with your token.
+    Returns a report of accessible vs denied endpoints.
+    """
+    result = await _get_client().probe_capabilities()
+    return _format(result)
+
+
 # --- Accounts ---
 
 

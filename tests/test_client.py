@@ -577,3 +577,101 @@ async def test_initiate_roll_with_filters(client: SpotinstClient):
     body = json.loads(route.calls[0].request.content)
     assert body["roll"]["launchSpecIds"] == ["ols-abc"]
     assert body["roll"]["instanceIds"] == ["i-123"]
+
+
+# --- Permission error handling ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_raises_permission_error_on_401(client: SpotinstClient):
+    respx.get("https://api.spotinst.io/setup/account").mock(
+        return_value=httpx.Response(401, json={"error": "unauthorized"})
+    )
+    with pytest.raises(PermissionError, match="Authentication failed"):
+        await client.list_accounts()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_raises_permission_error_on_403(client: SpotinstClient):
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
+    with pytest.raises(PermissionError, match="Access denied"):
+        await client.list_clusters()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_post_raises_permission_error_on_403(client: SpotinstClient):
+    respx.post("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc/aggregatedCosts").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
+    with pytest.raises(PermissionError, match="Access denied"):
+        await client.get_cluster_costs("o-abc", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_put_raises_permission_error_on_403(client: SpotinstClient):
+    respx.put("https://api.spotinst.io/ocean/aws/k8s/launchSpec/ols-abc").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
+    with pytest.raises(PermissionError, match="Access denied"):
+        await client.update_vng("ols-abc", {"maxCount": 5})
+
+
+# --- Capability probe ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_capabilities_full_access(client: SpotinstClient):
+    """Probe should report full access when all endpoints return 200."""
+    respx.get(url__regex=r".*").mock(return_value=httpx.Response(200, json=_api_response([])))
+    result = await client.probe_capabilities()
+    assert result["token_valid"] is True
+    assert len(result["denied"]) == 0
+    assert "full access" in result["recommendation"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_capabilities_partial_access(client: SpotinstClient):
+    """Probe should report denied endpoints."""
+    respx.get("https://api.spotinst.io/setup/account").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/ocean/azure/np/cluster").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/launchSpec").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/ocean/azure/np/virtualNodeGroup").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
+    respx.get("https://api.spotinst.io/aws/ec2/group").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/aws/ec2/managedInstance").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    result = await client.probe_capabilities()
+    assert result["token_valid"] is True
+    assert "azure_clusters" in result["denied"]
+    assert "azure_vngs" in result["denied"]
+    assert "lacks access" in result["recommendation"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_capabilities_invalid_token(client: SpotinstClient):
+    """Probe should detect invalid token."""
+    respx.get(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
+    result = await client.probe_capabilities()
+    assert result["token_valid"] is False

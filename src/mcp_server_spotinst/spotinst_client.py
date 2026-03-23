@@ -39,6 +39,20 @@ class SpotinstClient:
         aid = account_id or self.account_id
         return {"accountId": aid} if aid else {}
 
+    def _check_permission(self, resp: httpx.Response, path: str) -> None:
+        """Raise a clear error on 401/403 instead of a generic HTTP error."""
+        if resp.status_code == 401:
+            raise PermissionError(
+                f"Authentication failed for {path}. "
+                "Your SPOTINST_TOKEN may be invalid or expired."
+            )
+        if resp.status_code == 403:
+            raise PermissionError(
+                f"Access denied for {path}. "
+                "Your token does not have permission for this operation. "
+                "Check your token's policy/role in the Spot.io console."
+            )
+
     async def _get(
         self, path: str, params: dict[str, str] | None = None, account_id: str = ""
     ) -> Any:
@@ -46,6 +60,7 @@ class SpotinstClient:
         if params:
             all_params.update(params)
         resp = await self._client.get(path, params=all_params)
+        self._check_permission(resp, path)
         resp.raise_for_status()
         data = resp.json()
         return data.get("response", data)
@@ -56,6 +71,7 @@ class SpotinstClient:
         resp = await self._client.post(
             path, params=self._account_params(account_id), json=body
         )
+        self._check_permission(resp, path)
         resp.raise_for_status()
         data = resp.json()
         return data.get("response", data)
@@ -66,6 +82,7 @@ class SpotinstClient:
         resp = await self._client.put(
             path, params=self._account_params(account_id), json=body
         )
+        self._check_permission(resp, path)
         resp.raise_for_status()
         data = resp.json()
         return data.get("response", data)
@@ -79,6 +96,7 @@ class SpotinstClient:
             params=self._account_params(account_id),
             json=body,
         )
+        self._check_permission(resp, path)
         resp.raise_for_status()
         data = resp.json()
         return data.get("response", data)
@@ -109,6 +127,48 @@ class SpotinstClient:
         resp.raise_for_status()
         data = resp.json()
         return data.get("response", data)
+
+    # --- Token Capabilities ---
+
+    async def probe_capabilities(self) -> dict[str, Any]:
+        """Probe which API endpoints the current token can access."""
+        probes = {
+            "accounts": "/setup/account",
+            "aws_clusters": AWS_CLUSTER,
+            "azure_clusters": AZURE_CLUSTER,
+            "aws_vngs": AWS_VNG,
+            "azure_vngs": AZURE_VNG,
+            "elastigroups": "/aws/ec2/group",
+            "stateful_nodes": "/aws/ec2/managedInstance",
+        }
+
+        results: dict[str, Any] = {}
+        for name, path in probes.items():
+            resp = await self._client.get(path, params=self._account_params())
+            if resp.status_code == 200:
+                results[name] = "ok"
+            elif resp.status_code in (401, 403):
+                results[name] = "denied"
+            elif resp.status_code == 400:
+                # 400 usually means the endpoint exists but needs different params (e.g. wrong cloud)
+                results[name] = "ok (cloud mismatch or no resources)"
+            else:
+                results[name] = f"error ({resp.status_code})"
+
+        # Derive summary
+        accessible = [k for k, v in results.items() if v.startswith("ok")]
+        denied = [k for k, v in results.items() if v == "denied"]
+
+        return {
+            "token_valid": results.get("accounts") != "denied",
+            "accessible": accessible,
+            "denied": denied,
+            "details": results,
+            "recommendation": (
+                "Token has full access." if not denied
+                else f"Token lacks access to: {', '.join(denied)}. Some tools will not work."
+            ),
+        }
 
     # --- Accounts ---
 
