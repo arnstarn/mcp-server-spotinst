@@ -661,10 +661,14 @@ async def test_probe_capabilities_partial_access(client: SpotinstClient):
     respx.get("https://api.spotinst.io/aws/ec2/managedInstance").mock(
         return_value=httpx.Response(200, json=_api_response([]))
     )
+    respx.get("https://api.spotinst.io/azure/compute/statefulNode").mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
     result = await client.probe_capabilities()
     assert result["token_valid"] is True
     assert "azure_clusters" in result["denied"]
     assert "azure_vngs" in result["denied"]
+    assert "stateful_nodes_azure" in result["denied"]
     assert "lacks access" in result["recommendation"]
 
 
@@ -675,3 +679,57 @@ async def test_probe_capabilities_invalid_token(client: SpotinstClient):
     respx.get(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
     result = await client.probe_capabilities()
     assert result["token_valid"] is False
+
+
+# --- Azure right-sizing ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_right_sizing_azure(client: SpotinstClient):
+    """Azure right-sizing uses POST to /ocean/azure/np/cluster/{id}/rightSizing/suggestion."""
+    suggestions = [{"deploymentName": "nginx", "suggestedCPU": 100, "suggestedMemory": 256}]
+    route = respx.post(
+        "https://api.spotinst.io/ocean/azure/np/cluster/o-az1/rightSizing/suggestion"
+    ).mock(return_value=httpx.Response(200, json=_api_response(suggestions)))
+    result = await client.get_right_sizing_azure("o-az1")
+    assert result["items"][0]["deploymentName"] == "nginx"
+    assert route.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_right_sizing_azure_with_namespace(client: SpotinstClient):
+    """Azure right-sizing should pass namespace in the POST body."""
+    route = respx.post(
+        "https://api.spotinst.io/ocean/azure/np/cluster/o-az1/rightSizing/suggestion"
+    ).mock(return_value=httpx.Response(200, json=_api_response([])))
+    await client.get_right_sizing_azure("o-az1", namespace="kube-system")
+    import json
+    body = json.loads(route.calls[0].request.content)
+    assert body["namespace"] == "kube-system"
+
+
+# --- Azure stateful nodes ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_stateful_nodes_azure(client: SpotinstClient):
+    nodes = [{"id": "ssn-abc", "name": "test-vm", "region": "eastus"}]
+    respx.get("https://api.spotinst.io/azure/compute/statefulNode").mock(
+        return_value=httpx.Response(200, json=_api_response(nodes))
+    )
+    result = await client.list_stateful_nodes_azure()
+    assert result["items"][0]["id"] == "ssn-abc"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_stateful_node_azure(client: SpotinstClient):
+    node = [{"id": "ssn-abc", "name": "test-vm", "status": "RUNNING"}]
+    respx.get("https://api.spotinst.io/azure/compute/statefulNode/ssn-abc").mock(
+        return_value=httpx.Response(200, json=_api_response(node))
+    )
+    result = await client.get_stateful_node_azure("ssn-abc")
+    assert result["items"][0]["status"] == "RUNNING"

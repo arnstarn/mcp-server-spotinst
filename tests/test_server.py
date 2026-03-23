@@ -10,6 +10,8 @@ from mcp_server_spotinst.server import (
     filter_clusters_by_tag,
     filter_vngs_by_tag,
     get_cluster_scheduling,
+    get_right_sizing,
+    list_stateful_nodes_azure,
     mcp,
     remove_instances,
 )
@@ -17,7 +19,7 @@ from mcp_server_spotinst.server import (
 
 def test_all_tools_registered():
     tools = [t.name for t in mcp._tool_manager.list_tools()]
-    assert len(tools) == 35  # 30 read + 5 write
+    assert len(tools) == 37  # 32 read + 5 write
     assert "list_all_clusters" in tools
     assert "list_clusters_azure" in tools
     assert "initiate_roll" in tools
@@ -172,6 +174,29 @@ async def test_export_cluster_yaml_format():
         parsed = yaml.safe_load(result)
         assert parsed["id"] == "o-abc"
         assert parsed["autoScaler"]["isEnabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_right_sizing_azure_uses_post():
+    """get_right_sizing with cloud=azure should call the Azure POST endpoint."""
+    mock_resp = {"items": [{"deploymentName": "nginx", "suggestedCPU": 100}]}
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.get_right_sizing_azure = AsyncMock(return_value=mock_resp)
+        result = await get_right_sizing("o-abc", cloud="azure")
+        parsed = json.loads(result)
+        assert parsed["items"][0]["deploymentName"] == "nginx"
+        mock_client.return_value.get_right_sizing_azure.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_list_stateful_nodes_azure():
+    """list_stateful_nodes_azure should return Azure stateful nodes."""
+    mock_resp = {"items": [{"id": "ssn-abc", "name": "test-vm"}], "count": 1}
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.list_stateful_nodes_azure = AsyncMock(return_value=mock_resp)
+        result = await list_stateful_nodes_azure()
+        parsed = json.loads(result)
+        assert parsed["items"][0]["id"] == "ssn-abc"
 
 
 @pytest.mark.asyncio

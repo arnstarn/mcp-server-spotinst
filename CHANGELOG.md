@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-03-23
+
+### Added
+- **Azure parity improvements** — closing gaps between AWS and Azure tool coverage:
+  - **`get_right_sizing`** now supports `cloud="azure"` — uses POST `/ocean/azure/np/cluster/{id}/rightSizing/suggestion`
+  - **`list_stateful_nodes_azure`** / **`get_stateful_node_azure`** — Azure Stateful Node support
+- **`probe_token_capabilities`** — test which API endpoints your token can access before using tools
+- Graceful **401/403 error handling** — clear error messages instead of generic HTTP errors on all API calls
+- Azure Stateful Nodes added to capability probe
+- 6 new tests (70 total)
+
+### Notes
+- Azure does **not** have a detach instances API — `replace` and `remove_permanently` strategies remain AWS-only
+- Azure does **not** have an allowed instance types endpoint — VM sizes are configured in VNG settings
+
 ## [0.3.0] - 2026-03-23
 
 ### Added

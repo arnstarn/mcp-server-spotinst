@@ -140,6 +140,7 @@ class SpotinstClient:
             "azure_vngs": AZURE_VNG,
             "elastigroups": "/aws/ec2/group",
             "stateful_nodes": "/aws/ec2/managedInstance",
+            "stateful_nodes_azure": "/azure/compute/statefulNode",
         }
 
         results: dict[str, Any] = {}
@@ -307,7 +308,7 @@ class SpotinstClient:
             account_id=account_id,
         )
 
-    # --- Ocean Right-Sizing Suggestions (AWS only) ---
+    # --- Ocean Right-Sizing Suggestions ---
 
     async def get_right_sizing(
         self, cluster_id: str, namespace: str = "", account_id: str = ""
@@ -318,6 +319,18 @@ class SpotinstClient:
         return await self._get(
             f"{AWS_CLUSTER}/{cluster_id}/rightSizing/resourceSuggestion",
             params,
+            account_id=account_id,
+        )
+
+    async def get_right_sizing_azure(
+        self, cluster_id: str, namespace: str = "", account_id: str = ""
+    ) -> Any:
+        body: dict[str, Any] = {}
+        if namespace:
+            body["namespace"] = namespace
+        return await self._post(
+            f"{AZURE_CLUSTER}/{cluster_id}/rightSizing/suggestion",
+            body,
             account_id=account_id,
         )
 
@@ -463,6 +476,14 @@ class SpotinstClient:
 
     async def get_stateful_node(self, node_id: str, account_id: str = "") -> Any:
         return await self._get(f"/aws/ec2/managedInstance/{node_id}", account_id=account_id)
+
+    # --- Stateful Nodes (Azure) ---
+
+    async def list_stateful_nodes_azure(self, account_id: str = "") -> Any:
+        return await self._get("/azure/compute/statefulNode", account_id=account_id)
+
+    async def get_stateful_node_azure(self, node_id: str, account_id: str = "") -> Any:
+        return await self._get(f"/azure/compute/statefulNode/{node_id}", account_id=account_id)
 
     # --- Scheduling (Ocean Cluster Scheduling Config) ---
 

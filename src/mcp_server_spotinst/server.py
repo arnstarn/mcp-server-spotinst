@@ -235,21 +235,26 @@ async def get_cluster_costs(
     return _format(result)
 
 
-# --- Ocean Right-Sizing (AWS only) ---
+# --- Ocean Right-Sizing ---
 
 
 @mcp.tool()
 async def get_right_sizing(
-    cluster_id: str, namespace: str = "", account_id: str = ""
+    cluster_id: str, namespace: str = "", account_id: str = "", cloud: str = "aws"
 ) -> str:
-    """Get right-sizing resource suggestions for workloads in an AWS Ocean cluster.
+    """Get right-sizing resource suggestions for workloads in an Ocean cluster (AWS or Azure).
 
     Args:
         cluster_id: The Ocean cluster ID (e.g. o-abc12345)
         namespace: Optional namespace to filter suggestions
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
     """
-    result = await _get_client().get_right_sizing(cluster_id, namespace, account_id)
+    client = _get_client()
+    if cloud == "azure":
+        result = await client.get_right_sizing_azure(cluster_id, namespace, account_id)
+    else:
+        result = await client.get_right_sizing(cluster_id, namespace, account_id)
     return _format(result)
 
 
@@ -350,13 +355,39 @@ async def list_stateful_nodes(account_id: str = "") -> str:
 
 @mcp.tool()
 async def get_stateful_node(node_id: str, account_id: str = "") -> str:
-    """Get details of a specific Stateful Node (Managed Instance).
+    """Get details of a specific AWS Stateful Node (Managed Instance).
 
     Args:
         node_id: The Managed Instance ID (e.g. smi-abc12345)
         account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
     """
     result = await _get_client().get_stateful_node(node_id, account_id)
+    return _format(result)
+
+
+# --- Stateful Nodes (Azure) ---
+
+
+@mcp.tool()
+async def list_stateful_nodes_azure(account_id: str = "") -> str:
+    """List all Azure Stateful Nodes in an account.
+
+    Args:
+        account_id: Account ID for an Azure account.
+    """
+    result = await _get_client().list_stateful_nodes_azure(account_id)
+    return _format(result)
+
+
+@mcp.tool()
+async def get_stateful_node_azure(node_id: str, account_id: str = "") -> str:
+    """Get details of a specific Azure Stateful Node.
+
+    Args:
+        node_id: The Azure Stateful Node ID
+        account_id: Account ID for an Azure account.
+    """
+    result = await _get_client().get_stateful_node_azure(node_id, account_id)
     return _format(result)
 
 
