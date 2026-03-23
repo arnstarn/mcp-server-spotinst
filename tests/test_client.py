@@ -1,7 +1,5 @@
 """Tests for the Spotinst API client using mocked HTTP responses."""
 
-import json
-
 import httpx
 import pytest
 import respx
@@ -216,3 +214,73 @@ async def test_initiate_roll(client: SpotinstClient):
     )
     result = await client.initiate_roll("o-abc123")
     assert result["items"][0]["status"] == "IN_PROGRESS"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_stateful_nodes(client: SpotinstClient):
+    nodes = [{"id": "smi-abc", "name": "my-stateful", "state": "ACTIVE"}]
+    respx.get("https://api.spotinst.io/aws/ec2/managedInstance").mock(
+        return_value=httpx.Response(200, json=_api_response(nodes))
+    )
+    result = await client.list_stateful_nodes()
+    assert result["items"][0]["id"] == "smi-abc"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_stateful_node(client: SpotinstClient):
+    node = [{"id": "smi-abc", "name": "my-stateful", "state": "ACTIVE", "region": "us-east-1"}]
+    respx.get("https://api.spotinst.io/aws/ec2/managedInstance/smi-abc").mock(
+        return_value=httpx.Response(200, json=_api_response(node))
+    )
+    result = await client.get_stateful_node("smi-abc")
+    assert result["items"][0]["region"] == "us-east-1"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_cluster_health(client: SpotinstClient):
+    """Verify composite health check gathers nodes, logs, and rolls."""
+    nodes = [
+        {"instanceId": "i-1", "lifeCycle": "Spot"},
+        {"instanceId": "i-2", "lifeCycle": "Spot"},
+        {"instanceId": "i-3", "lifeCycle": "OD"},
+    ]
+    logs = [
+        {"message": "Scale up", "severity": "INFO"},
+        {"message": "Failed", "severity": "ERROR"},
+    ]
+    rolls = [{"id": "scr-1", "status": "COMPLETED"}]
+
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/nodes").mock(
+        return_value=httpx.Response(200, json=_api_response(nodes))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/log").mock(
+        return_value=httpx.Response(200, json=_api_response(logs))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster/o-abc123/roll").mock(
+        return_value=httpx.Response(200, json=_api_response(rolls))
+    )
+
+    result = await client.get_cluster_health("o-abc123")
+    assert result["nodes"]["total"] == 3
+    assert result["nodes"]["by_lifecycle"]["Spot"] == 2
+    assert result["nodes"]["by_lifecycle"]["OD"] == 1
+    assert result["logs_24h"]["errors"] == 1
+    assert result["rolls"]["total"] == 1
+    assert result["rolls"]["active"] == 0
+    assert result["health"] == "OK"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_cost_trending(client: SpotinstClient):
+    """Verify cost trending fetches multiple periods."""
+    costs = [{"result": {"totalForDuration": {"summary": {"total": 100.0}}}}]
+    respx.post(url__regex=r".*/aggregatedCosts$").mock(
+        return_value=httpx.Response(200, json=_api_response(costs))
+    )
+    result = await client.get_cost_trending("o-abc123", periods=2, period_days=7)
+    assert len(result) == 2
+    assert "period" in result[0]

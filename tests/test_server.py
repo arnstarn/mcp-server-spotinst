@@ -5,7 +5,7 @@ from mcp_server_spotinst.server import mcp
 
 def test_all_tools_registered():
     tools = [t.name for t in mcp._tool_manager.list_tools()]
-    assert len(tools) == 23  # 19 read + 4 write
+    assert len(tools) == 33  # 29 read + 4 write
     assert "list_all_clusters" in tools
     assert "list_clusters_azure" in tools
     assert "initiate_roll" in tools

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -394,6 +395,137 @@ class SpotinstClient:
         return await self._put(
             f"{AZURE_VNG}/{vng_id}", updates, account_id=account_id
         )
+
+    # --- Stateful Nodes (AWS Managed Instances) ---
+
+    async def list_stateful_nodes(self, account_id: str = "") -> Any:
+        return await self._get("/aws/ec2/managedInstance", account_id=account_id)
+
+    async def get_stateful_node(self, node_id: str, account_id: str = "") -> Any:
+        return await self._get(f"/aws/ec2/managedInstance/{node_id}", account_id=account_id)
+
+    # --- Scheduling (Ocean Cluster Scheduling Config) ---
+
+    async def get_cluster_scheduling(self, cluster_id: str, account_id: str = "", cloud: str = "aws") -> Any:
+        """Get the full cluster config and extract scheduling/auto-scaler settings."""
+        prefix = AZURE_CLUSTER if cloud == "azure" else AWS_CLUSTER
+        return await self._get(f"{prefix}/{cluster_id}", account_id=account_id)
+
+    # --- Cost Trending ---
+
+    async def get_cost_trending(
+        self,
+        cluster_id: str,
+        periods: int = 4,
+        period_days: int = 7,
+        group_by: str = "namespace",
+        account_id: str = "",
+        cloud: str = "aws",
+    ) -> list[dict[str, Any]]:
+        """Get costs for multiple consecutive time periods for trending analysis."""
+        now = datetime.now(timezone.utc)
+        results = []
+
+        async def _fetch_period(i: int) -> dict[str, Any]:
+            end = now - timedelta(days=i * period_days)
+            start = end - timedelta(days=period_days)
+            try:
+                resp = await self.get_cluster_costs(
+                    cluster_id,
+                    start.strftime("%Y-%m-%dT00:00:00Z"),
+                    end.strftime("%Y-%m-%dT00:00:00Z"),
+                    group_by,
+                    account_id,
+                    cloud,
+                )
+                return {
+                    "period": f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}",
+                    "start": start.strftime("%Y-%m-%dT00:00:00Z"),
+                    "end": end.strftime("%Y-%m-%dT00:00:00Z"),
+                    "data": resp,
+                }
+            except Exception as e:
+                return {
+                    "period": f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}",
+                    "error": str(e),
+                }
+
+        tasks = [_fetch_period(i) for i in range(periods)]
+        results = await asyncio.gather(*tasks)
+        return sorted(results, key=lambda x: x.get("start", ""))
+
+    # --- Spot Savings ---
+
+    async def get_cluster_summary(self, cluster_id: str, account_id: str = "", cloud: str = "aws") -> Any:
+        """Get cluster summary including savings data from costs endpoint."""
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=30)
+        return await self.get_cluster_costs(
+            cluster_id,
+            start.strftime("%Y-%m-%dT00:00:00Z"),
+            now.strftime("%Y-%m-%dT00:00:00Z"),
+            "namespace",
+            account_id,
+            cloud,
+        )
+
+    # --- Cluster Health ---
+
+    async def get_cluster_health(self, cluster_id: str, account_id: str = "", cloud: str = "aws") -> dict[str, Any]:
+        """Composite health check: nodes + recent logs + rolls."""
+        prefix = AZURE_CLUSTER if cloud == "azure" else AWS_CLUSTER
+        now = datetime.now(timezone.utc)
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        today = now.strftime("%Y-%m-%d")
+
+        nodes_task = self._get_safe(f"{prefix}/{cluster_id}/nodes", account_id=account_id)
+        logs_task = self._get_safe(
+            f"{prefix}/{cluster_id}/log",
+            params={"fromDate": yesterday, "toDate": today, "severity": "ALL", "limit": "50"},
+            account_id=account_id,
+        )
+        rolls_task = self._get_safe(f"{prefix}/{cluster_id}/roll", account_id=account_id)
+
+        nodes_resp, logs_resp, rolls_resp = await asyncio.gather(nodes_task, logs_task, rolls_task)
+
+        # Analyze nodes
+        nodes = (nodes_resp or {}).get("items", [])
+        total_nodes = len(nodes)
+        lifecycle_counts: dict[str, int] = {}
+        for n in nodes:
+            lc = n.get("lifeCycle", n.get("vmSize", "unknown"))
+            lifecycle_counts[lc] = lifecycle_counts.get(lc, 0) + 1
+
+        # Analyze logs
+        logs = (logs_resp or {}).get("items", [])
+        error_count = sum(1 for entry in logs if entry.get("severity") == "ERROR")
+        warn_count = sum(1 for entry in logs if entry.get("severity") == "WARN")
+        recent_errors = [entry for entry in logs if entry.get("severity") == "ERROR"][:5]
+
+        # Analyze rolls
+        rolls = (rolls_resp or {}).get("items", [])
+        active_rolls = [r for r in rolls if r.get("status") in ("IN_PROGRESS", "PENDING")]
+
+        return {
+            "cluster_id": cluster_id,
+            "cloud": cloud,
+            "nodes": {
+                "total": total_nodes,
+                "by_lifecycle": lifecycle_counts,
+            },
+            "logs_24h": {
+                "total": len(logs),
+                "errors": error_count,
+                "warnings": warn_count,
+                "recent_errors": recent_errors,
+            },
+            "rolls": {
+                "total": len(rolls),
+                "active": len(active_rolls),
+                "active_details": active_rolls,
+            },
+            "health": "DEGRADED" if error_count > 5 or active_rolls else "OK",
+        }
 
     async def close(self) -> None:
         await self._client.aclose()

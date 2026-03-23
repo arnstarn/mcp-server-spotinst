@@ -2,6 +2,7 @@
 
 import json
 
+import yaml
 from mcp.server.fastmcp import FastMCP
 
 from .spotinst_client import SpotinstClient
@@ -318,6 +319,232 @@ async def get_allowed_instance_types(
     """
     result = await _get_client().get_allowed_instance_types(cluster_id, account_id)
     return _format(result)
+
+
+# --- Stateful Nodes (AWS Managed Instances) ---
+
+
+@mcp.tool()
+async def list_stateful_nodes(account_id: str = "") -> str:
+    """List all Stateful Nodes (Managed Instances) in an AWS account.
+
+    Args:
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+    """
+    result = await _get_client().list_stateful_nodes(account_id)
+    return _format(result)
+
+
+@mcp.tool()
+async def get_stateful_node(node_id: str, account_id: str = "") -> str:
+    """Get details of a specific Stateful Node (Managed Instance).
+
+    Args:
+        node_id: The Managed Instance ID (e.g. smi-abc12345)
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+    """
+    result = await _get_client().get_stateful_node(node_id, account_id)
+    return _format(result)
+
+
+# --- Scheduling ---
+
+
+@mcp.tool()
+async def get_cluster_scheduling(cluster_id: str, account_id: str = "", cloud: str = "aws") -> str:
+    """Get scheduling and auto-scaler configuration for an Ocean cluster (AWS or Azure).
+    Shows shutdown hours, scheduled tasks, and auto-scaler settings.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    result = await _get_client().get_cluster_scheduling(cluster_id, account_id, cloud)
+    # Extract just the scheduling-relevant fields
+    items = result.get("items", [])
+    if items:
+        cluster = items[0]
+        scheduling_info = {
+            "scheduling": cluster.get("scheduling", {}),
+            "autoScaler": cluster.get("autoScaler", {}),
+        }
+        return _format(scheduling_info)
+    return _format(result)
+
+
+# --- Cluster Health Check ---
+
+
+@mcp.tool()
+async def get_cluster_health(cluster_id: str, account_id: str = "", cloud: str = "aws") -> str:
+    """Composite health check for an Ocean cluster. Returns node status, recent errors, and active rolls in one call.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    result = await _get_client().get_cluster_health(cluster_id, account_id, cloud)
+    return _format(result)
+
+
+# --- Cost Trending ---
+
+
+@mcp.tool()
+async def get_cost_trending(
+    cluster_id: str,
+    periods: int = 4,
+    period_days: int = 7,
+    group_by: str = "namespace",
+    account_id: str = "",
+    cloud: str = "aws",
+) -> str:
+    """Get cost trends over multiple time periods for an Ocean cluster.
+
+    Shows week-over-week or custom period cost changes.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        periods: Number of time periods to compare (default: 4)
+        period_days: Days per period (default: 7 for weekly)
+        group_by: Group costs by: namespace or resource (default: namespace)
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    result = await _get_client().get_cost_trending(cluster_id, periods, period_days, group_by, account_id, cloud)
+    return _format(result)
+
+
+# --- Savings Summary ---
+
+
+@mcp.tool()
+async def get_savings_summary(cluster_id: str, account_id: str = "", cloud: str = "aws") -> str:
+    """Get a 30-day cost/savings summary for an Ocean cluster. Shows total spend, spot savings, and cost breakdown.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    result = await _get_client().get_cluster_summary(cluster_id, account_id, cloud)
+    return _format(result)
+
+
+# --- Filter by Tags ---
+
+
+@mcp.tool()
+async def filter_clusters_by_tag(tag_key: str, tag_value: str = "", account_id: str = "", cloud: str = "aws") -> str:
+    """Filter Ocean clusters by tag key (and optionally tag value). Works for AWS and Azure.
+
+    Args:
+        tag_key: Tag key to filter by (e.g. environment, team)
+        tag_value: Optional tag value to match (e.g. production). If empty, matches any value for the key.
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    client = _get_client()
+    if cloud == "azure":
+        resp = await client.list_clusters_azure(account_id)
+    else:
+        resp = await client.list_clusters(account_id)
+
+    clusters = resp.get("items", [])
+    matched = []
+    for c in clusters:
+        tags = c.get("tags", [])
+        # Tags can be list of {tagKey, tagValue} or dict
+        if isinstance(tags, list):
+            for t in tags:
+                k = t.get("tagKey", t.get("key", ""))
+                v = t.get("tagValue", t.get("value", ""))
+                if k == tag_key and (not tag_value or v == tag_value):
+                    matched.append(c)
+                    break
+        elif isinstance(tags, dict) and tag_key in tags:
+            if not tag_value or tags[tag_key] == tag_value:
+                matched.append(c)
+    return _format({"matched": len(matched), "clusters": matched})
+
+
+@mcp.tool()
+async def filter_vngs_by_tag(
+    tag_key: str, tag_value: str = "", ocean_id: str = "", account_id: str = "", cloud: str = "aws"
+) -> str:
+    """Filter VNGs by tag key (and optionally tag value). Works for AWS and Azure.
+
+    Args:
+        tag_key: Tag key to filter by (e.g. team, workload-type)
+        tag_value: Optional tag value to match. If empty, matches any value for the key.
+        ocean_id: Optional Ocean cluster ID to filter by
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    client = _get_client()
+    if cloud == "azure":
+        resp = await client.list_vngs_azure(ocean_id or None, account_id)
+    else:
+        resp = await client.list_vngs(ocean_id or None, account_id)
+
+    vngs = resp.get("items", [])
+    matched = []
+    for v in vngs:
+        tags = v.get("tags", [])
+        if isinstance(tags, list):
+            for t in tags:
+                k = t.get("tagKey", t.get("key", ""))
+                val = t.get("tagValue", t.get("value", ""))
+                if k == tag_key and (not tag_value or val == tag_value):
+                    matched.append(v)
+                    break
+        elif isinstance(tags, dict) and tag_key in tags:
+            if not tag_value or tags[tag_key] == tag_value:
+                matched.append(v)
+    return _format({"matched": len(matched), "vngs": matched})
+
+
+# --- Export to YAML ---
+
+
+@mcp.tool()
+async def export_cluster_yaml(cluster_id: str, account_id: str = "", cloud: str = "aws") -> str:
+    """Export an Ocean cluster configuration as YAML. Useful for GitOps comparison or backup.
+
+    Args:
+        cluster_id: The Ocean cluster ID (e.g. o-abc12345)
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    client = _get_client()
+    if cloud == "azure":
+        result = await client.get_cluster_azure(cluster_id, account_id)
+    else:
+        result = await client.get_cluster(cluster_id, account_id)
+    items = result.get("items", [result])
+    config = items[0] if items else result
+    return yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+
+@mcp.tool()
+async def export_vng_yaml(vng_id: str, account_id: str = "", cloud: str = "aws") -> str:
+    """Export a VNG configuration as YAML. Useful for GitOps comparison or backup.
+
+    Args:
+        vng_id: The VNG ID (e.g. ols-abc12345 for AWS, vng-abc12345 for Azure)
+        account_id: Optional account ID to query. Defaults to SPOTINST_ACCOUNT_ID env var.
+        cloud: Cloud provider: aws or azure (default: aws)
+    """
+    client = _get_client()
+    if cloud == "azure":
+        result = await client.get_vng_azure(vng_id, account_id)
+    else:
+        result = await client.get_vng(vng_id, account_id)
+    items = result.get("items", [result])
+    config = items[0] if items else result
+    return yaml.dump(config, default_flow_style=False, sort_keys=False)
 
 
 # ===================================================================
