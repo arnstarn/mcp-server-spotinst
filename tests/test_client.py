@@ -625,10 +625,30 @@ async def test_put_raises_permission_error_on_403(client: SpotinstClient):
 # --- Capability probe ---
 
 
+def _api_response_with_ids(cluster_id: str = "", vng_id: str = "") -> dict:
+    """Build API response with real-looking resource IDs for probe tests."""
+    items = []
+    if cluster_id:
+        items = [{"id": cluster_id, "name": "test-cluster"}]
+    elif vng_id:
+        items = [{"id": vng_id, "name": "test-vng"}]
+    return _api_response(items)
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_probe_capabilities_full_access(client: SpotinstClient):
     """Probe should report full read + write access when all endpoints succeed."""
+    # Return real resource IDs so write probes can discover them
+    respx.get("https://api.spotinst.io/setup/account").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster").mock(
+        return_value=httpx.Response(200, json=_api_response_with_ids(cluster_id="o-abc123"))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/launchSpec").mock(
+        return_value=httpx.Response(200, json=_api_response_with_ids(vng_id="ols-abc123"))
+    )
     respx.get(url__regex=r".*").mock(return_value=httpx.Response(200, json=_api_response([])))
     # Write probes return 400 (bad input) = has permission
     respx.post(url__regex=r".*").mock(return_value=httpx.Response(400, json={"error": "bad request"}))
@@ -637,7 +657,7 @@ async def test_probe_capabilities_full_access(client: SpotinstClient):
     assert result["token_valid"] is True
     assert len(result["denied"]) == 0
     assert "full read + write" in result["recommendation"]
-    assert len(result["write_access"]) == 4
+    assert len(result["write_access"]) == 3  # roll, detach, update_vng (no azure vng without real ID)
     assert len(result["write_denied"]) == 0
 
 
@@ -649,13 +669,13 @@ async def test_probe_capabilities_partial_access(client: SpotinstClient):
         return_value=httpx.Response(200, json=_api_response([]))
     )
     respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster").mock(
-        return_value=httpx.Response(200, json=_api_response([]))
+        return_value=httpx.Response(200, json=_api_response_with_ids(cluster_id="o-abc123"))
     )
     respx.get("https://api.spotinst.io/ocean/azure/np/cluster").mock(
         return_value=httpx.Response(403, json={"error": "forbidden"})
     )
     respx.get("https://api.spotinst.io/ocean/aws/k8s/launchSpec").mock(
-        return_value=httpx.Response(200, json=_api_response([]))
+        return_value=httpx.Response(200, json=_api_response_with_ids(vng_id="ols-abc123"))
     )
     respx.get("https://api.spotinst.io/ocean/azure/np/virtualNodeGroup").mock(
         return_value=httpx.Response(403, json={"error": "forbidden"})
@@ -669,15 +689,12 @@ async def test_probe_capabilities_partial_access(client: SpotinstClient):
     respx.get("https://api.spotinst.io/azure/compute/statefulNode").mock(
         return_value=httpx.Response(403, json={"error": "forbidden"})
     )
-    # Write probes: roll and detach ok, VNG updates denied
+    # Write probes: roll and detach ok, VNG update denied
     respx.post(url__regex=r".*").mock(return_value=httpx.Response(400, json={"error": "bad request"}))
     respx.put(url__regex=r".*/detachInstances.*").mock(
         return_value=httpx.Response(400, json={"error": "bad request"})
     )
     respx.put(url__regex=r".*/launchSpec/.*").mock(
-        return_value=httpx.Response(403, json={"error": "forbidden"})
-    )
-    respx.put(url__regex=r".*/virtualNodeGroup/.*").mock(
         return_value=httpx.Response(403, json={"error": "forbidden"})
     )
     result = await client.probe_capabilities()
@@ -686,7 +703,6 @@ async def test_probe_capabilities_partial_access(client: SpotinstClient):
     assert "azure_vngs" in result["denied"]
     assert "stateful_nodes_azure" in result["denied"]
     assert "write_update_vng" in result["write_denied"]
-    assert "write_update_vng_azure" in result["write_denied"]
     assert "partial write" in result["recommendation"]
 
 
@@ -695,8 +711,7 @@ async def test_probe_capabilities_partial_access(client: SpotinstClient):
 async def test_probe_capabilities_invalid_token(client: SpotinstClient):
     """Probe should detect invalid token."""
     respx.get(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
-    respx.post(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
-    respx.put(url__regex=r".*").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
+    # No write probes fire — no resources discovered
     result = await client.probe_capabilities()
     assert result["token_valid"] is False
     assert len(result["write_access"]) == 0
@@ -706,14 +721,24 @@ async def test_probe_capabilities_invalid_token(client: SpotinstClient):
 @pytest.mark.asyncio
 async def test_probe_capabilities_read_only_token(client: SpotinstClient):
     """Probe should detect read-only token (reads ok, writes denied)."""
+    respx.get("https://api.spotinst.io/setup/account").mock(
+        return_value=httpx.Response(200, json=_api_response([]))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/cluster").mock(
+        return_value=httpx.Response(200, json=_api_response_with_ids(cluster_id="o-abc123"))
+    )
+    respx.get("https://api.spotinst.io/ocean/aws/k8s/launchSpec").mock(
+        return_value=httpx.Response(200, json=_api_response_with_ids(vng_id="ols-abc123"))
+    )
     respx.get(url__regex=r".*").mock(return_value=httpx.Response(200, json=_api_response([])))
+    # All writes denied
     respx.post(url__regex=r".*").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
     respx.put(url__regex=r".*").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
     result = await client.probe_capabilities()
     assert result["token_valid"] is True
     assert len(result["read_access"]) == 8
     assert len(result["write_access"]) == 0
-    assert len(result["write_denied"]) == 4
+    assert len(result["write_denied"]) == 3  # roll, detach, update_vng
     assert "read-only" in result["recommendation"]
 
 

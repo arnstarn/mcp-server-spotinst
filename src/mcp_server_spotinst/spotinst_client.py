@@ -144,23 +144,23 @@ class SpotinstClient:
             "stateful_nodes_azure": "/azure/compute/statefulNode",
         }
 
-        # Write probes — use fake IDs so nothing actually happens.
-        # 403 = no write permission, 400/404 = has permission (bad input).
-        write_probes = {
-            "write_roll": ("POST", f"{AWS_CLUSTER}/o-fake000000/roll", {"roll": {}}),
-            "write_detach": ("PUT", f"{AWS_CLUSTER}/o-fake000000/detachInstances", {"instancesToDetach": []}),
-            "write_update_vng": ("PUT", f"{AWS_VNG}/ols-fake000000", {"launchSpec": {}}),
-            "write_update_vng_azure": ("PUT", f"{AZURE_VNG}/vng-fake000000", {}),
-        }
-
         results: dict[str, Any] = {}
         params = self._account_params()
 
-        # Probe reads
+        # Probe reads and discover real resource IDs for write probes
+        real_cluster_id: str | None = None
+        real_vng_id: str | None = None
         for name, path in read_probes.items():
             resp = await self._client.get(path, params=params)
             if resp.status_code == 200:
                 results[name] = "ok"
+                # Extract a real resource ID for write probes
+                data = resp.json().get("response", {})
+                items = data.get("items", [])
+                if items and name == "aws_clusters" and not real_cluster_id:
+                    real_cluster_id = items[0].get("id")
+                if items and name == "aws_vngs" and not real_vng_id:
+                    real_vng_id = items[0].get("id")
             elif resp.status_code in (401, 403):
                 results[name] = "denied"
             elif resp.status_code == 400:
@@ -168,14 +168,35 @@ class SpotinstClient:
             else:
                 results[name] = f"error ({resp.status_code})"
 
-        # Probe writes (dry-run with fake IDs)
+        # Write probes — use real resource IDs with invalid bodies.
+        # The API must resolve the resource before checking permissions,
+        # so fake IDs get 404 without ever checking write access.
+        # With a real ID: 403 = denied, 400 = has permission (bad body).
+        write_probes: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        if real_cluster_id:
+            write_probes["write_roll"] = (
+                "POST", f"{AWS_CLUSTER}/{real_cluster_id}/roll", {"roll": {}}
+            )
+            write_probes["write_detach"] = (
+                "PUT", f"{AWS_CLUSTER}/{real_cluster_id}/detachInstances",
+                {"instancesToDetach": []},
+            )
+        if real_vng_id:
+            write_probes["write_update_vng"] = (
+                "PUT", f"{AWS_VNG}/{real_vng_id}", {"launchSpec": {}}
+            )
+
+        # Probe writes (dry-run: real IDs, invalid bodies — nothing mutates)
         for name, (method, path, body) in write_probes.items():
             resp = await self._client.request(method, path, params=params, json=body)
             if resp.status_code in (401, 403):
                 results[name] = "denied"
             else:
-                # 400, 404, etc. = token has permission, input was just invalid
+                # 400 = token has permission, body was just invalid
                 results[name] = "ok (dry-run)"
+
+        if not write_probes:
+            results["write_probe"] = "skipped (no resources found to probe against)"
 
         # Derive summary
         accessible = [k for k, v in results.items() if v.startswith("ok")]
