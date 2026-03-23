@@ -7,7 +7,7 @@
 
 MCP server for the [Spot.io (Spotinst)](https://spot.io/) API. Supports both AWS and Azure Ocean clusters with multi-account access.
 
-## Tools (23)
+## Tools (33)
 
 ### Cross-Account
 
@@ -47,6 +47,41 @@ MCP server for the [Spot.io (Spotinst)](https://spot.io/) API. Supports both AWS
 | `list_rolls` | List deployment rolls |
 | `get_roll` | Get roll details |
 | `get_cluster_log` | Get scaling and activity log events |
+
+### Stateful Nodes (AWS Managed Instances)
+
+| Tool | Description |
+|------|-------------|
+| `list_stateful_nodes` | List all Stateful Nodes (Managed Instances) |
+| `get_stateful_node` | Get Stateful Node details |
+
+### Scheduling & Health
+
+| Tool | Description |
+|------|-------------|
+| `get_cluster_scheduling` | Get scheduling and auto-scaler configuration |
+| `get_cluster_health` | Composite health check: nodes, recent errors, active rolls |
+
+### Cost Analysis
+
+| Tool | Description |
+|------|-------------|
+| `get_cost_trending` | Week-over-week (or custom period) cost comparison |
+| `get_savings_summary` | 30-day cost and savings summary |
+
+### Tag Filtering
+
+| Tool | Description |
+|------|-------------|
+| `filter_clusters_by_tag` | Filter clusters by tag key/value |
+| `filter_vngs_by_tag` | Filter VNGs by tag key/value |
+
+### Export (YAML)
+
+| Tool | Description |
+|------|-------------|
+| `export_cluster_yaml` | Export cluster config as YAML for GitOps/backup |
+| `export_vng_yaml` | Export VNG config as YAML for GitOps/backup |
 
 ### Write Operations (require `confirm=true`)
 
@@ -97,6 +132,13 @@ Add to `~/.mcp.json`:
     }
   }
 }
+```
+
+### Docker
+
+```bash
+docker build -t mcp-server-spotinst .
+docker run -e SPOTINST_TOKEN=your-token -e SPOTINST_ACCOUNT_ID=act-xxxxxxxx mcp-server-spotinst
 ```
 
 ### Run Standalone
