@@ -7,7 +7,7 @@
 
 MCP server for the [Spot.io (Spotinst)](https://spot.io/) API. Supports both AWS and Azure Ocean clusters with multi-account access.
 
-## Tools (33)
+## Tools (34)
 
 ### Cross-Account
 
@@ -87,12 +87,37 @@ MCP server for the [Spot.io (Spotinst)](https://spot.io/) API. Supports both AWS
 
 | Tool | Description |
 |------|-------------|
+| `remove_instances` | **Recommended** — Remove instances using a named strategy (see below) |
 | `initiate_roll` | Rolling restart of nodes in an Ocean cluster |
 | `detach_instances` | Detach and optionally terminate instances from an AWS Ocean cluster |
 | `update_vng` | Update an AWS VNG configuration |
 | `update_vng_azure` | Update an Azure VNG configuration |
 
 All tools accept an optional `account_id` parameter to query any account.
+
+### Instance Removal Strategies
+
+The `remove_instances` tool provides a safe, intent-based interface for removing instances. Instead of remembering which API flags to set, you pick a strategy:
+
+| Strategy | What happens | Use case |
+|----------|-------------|----------|
+| `drain_and_replace` | Gracefully drain pods (respects PDBs), terminate, Ocean replaces. **Default and safest.** | Replacing a problematic node in production |
+| `replace` | Immediately terminate, Ocean auto-replaces. No graceful drain. AWS only. | Fast replacement when drain isn't needed |
+| `remove_permanently` | Terminate + reduce cluster capacity. No replacement. AWS only. | Downsizing the cluster |
+
+When `confirm=false` (default), the tool shows a detailed execution plan so you can review before proceeding:
+
+```
+remove_instances("o-abc123", "i-abc123", strategy="drain_and_replace")
+
+→ SAFETY: Action NOT executed. Set confirm=true to proceed.
+  DRAIN AND REPLACE 1 instance(s) in cluster o-abc123:
+    Instances: ['i-abc123']
+    Method: Rolling restart (20% per batch)
+    - Pods will be gracefully drained (PDBs respected)
+    - Instances will be terminated after drain
+    - Ocean will automatically launch replacements
+```
 
 ## Setup
 
