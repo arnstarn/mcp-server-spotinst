@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mcp_server_spotinst.server import (
+    _looks_like_base64,
     _truncate_items,
     export_cluster_yaml,
     filter_clusters_by_tag,
@@ -18,7 +19,142 @@ from mcp_server_spotinst.server import (
     list_vngs,
     mcp,
     remove_instances,
+    update_vng,
 )
+
+
+def test_looks_like_base64():
+    """_looks_like_base64 should distinguish base64 from raw text."""
+    import base64
+    assert _looks_like_base64(base64.b64encode(b"hello").decode())
+    assert _looks_like_base64(base64.b64encode(b"#!/bin/bash\nset -e\n").decode())
+    # Raw shell script should NOT be mistaken for base64
+    assert not _looks_like_base64("#!/bin/bash\nset -e\necho hi")
+    assert not _looks_like_base64("just plain text here with spaces")
+    # Empty string is "already encoded" (no-op)
+    assert _looks_like_base64("")
+
+
+@pytest.mark.asyncio
+async def test_update_vng_auto_encodes_userdata():
+    """update_vng should auto base64-encode plaintext userData."""
+    import base64
+    captured = {}
+
+    async def fake_update(vng_id, updates, account_id, auto_apply_tags=None):
+        captured["updates"] = updates
+        return {"items": [{"id": vng_id}]}
+
+    async def fake_get_vng(vng_id, account_id):
+        return {"items": [{"id": vng_id}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.update_vng = AsyncMock(side_effect=fake_update)
+        mock_client.return_value.get_vng = AsyncMock(side_effect=fake_get_vng)
+        plaintext = "#!/bin/bash\nset -e\necho hello"
+        await update_vng(
+            "ols-abc",
+            json.dumps({"userData": plaintext}),
+            confirm=True,
+        )
+    sent = captured["updates"]["userData"]
+    assert sent != plaintext, "userData should have been base64-encoded"
+    assert base64.b64decode(sent).decode() == plaintext
+
+
+@pytest.mark.asyncio
+async def test_update_vng_skips_encode_when_already_base64():
+    """update_vng should NOT double-encode already-base64 userData."""
+    import base64
+    captured = {}
+
+    async def fake_update(vng_id, updates, account_id, auto_apply_tags=None):
+        captured["updates"] = updates
+        return {"items": [{"id": vng_id}]}
+
+    async def fake_get_vng(vng_id, account_id):
+        return {"items": [{"id": vng_id}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.update_vng = AsyncMock(side_effect=fake_update)
+        mock_client.return_value.get_vng = AsyncMock(side_effect=fake_get_vng)
+        already = base64.b64encode(b"#!/bin/bash\nset -e\n").decode()
+        await update_vng(
+            "ols-abc",
+            json.dumps({"userData": already}),
+            confirm=True,
+        )
+    assert captured["updates"]["userData"] == already
+
+
+@pytest.mark.asyncio
+async def test_update_vng_opt_out_encoding():
+    """encode_user_data=False should pass userData through unchanged."""
+    captured = {}
+
+    async def fake_update(vng_id, updates, account_id, auto_apply_tags=None):
+        captured["updates"] = updates
+        return {"items": [{"id": vng_id}]}
+
+    async def fake_get_vng(vng_id, account_id):
+        return {"items": [{"id": vng_id}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.update_vng = AsyncMock(side_effect=fake_update)
+        mock_client.return_value.get_vng = AsyncMock(side_effect=fake_get_vng)
+        raw = "raw-thing-not-base64"
+        await update_vng(
+            "ols-abc",
+            json.dumps({"userData": raw}),
+            confirm=True,
+            encode_user_data=False,
+        )
+    assert captured["updates"]["userData"] == raw
+
+
+@pytest.mark.asyncio
+async def test_update_vng_returns_readback():
+    """Response should include both put_result and readback so callers verify the change landed."""
+    async def fake_update(vng_id, updates, account_id, auto_apply_tags=None):
+        return {"items": [{"id": vng_id, "updateReceived": True}]}
+
+    async def fake_get_vng(vng_id, account_id):
+        return {"items": [{"id": vng_id, "resourceLimits": {"maxInstanceCount": 20}}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.update_vng = AsyncMock(side_effect=fake_update)
+        mock_client.return_value.get_vng = AsyncMock(side_effect=fake_get_vng)
+        result = await update_vng(
+            "ols-abc",
+            json.dumps({"resourceLimits": {"maxInstanceCount": 20}}),
+            confirm=True,
+        )
+    parsed = json.loads(result)
+    assert "put_result" in parsed
+    assert "readback" in parsed
+    assert parsed["readback"]["items"][0]["resourceLimits"]["maxInstanceCount"] == 20
+
+
+@pytest.mark.asyncio
+async def test_update_vng_readback_error_captured():
+    """If readback fails, response should surface the error instead of re-raising."""
+    async def fake_update(vng_id, updates, account_id, auto_apply_tags=None):
+        return {"items": [{"id": vng_id}]}
+
+    async def fake_get_vng(vng_id, account_id):
+        raise RuntimeError("readback failed")
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.update_vng = AsyncMock(side_effect=fake_update)
+        mock_client.return_value.get_vng = AsyncMock(side_effect=fake_get_vng)
+        result = await update_vng(
+            "ols-abc",
+            json.dumps({"tags": []}),
+            confirm=True,
+        )
+    parsed = json.loads(result)
+    assert "_readback_error" in parsed["readback"]
+    assert "readback failed" in parsed["readback"]["_readback_error"]
 
 
 def test_all_tools_registered():

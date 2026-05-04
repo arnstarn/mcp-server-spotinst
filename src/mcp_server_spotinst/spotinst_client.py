@@ -1,13 +1,21 @@
 """Spot.io (Spotinst) API client."""
 
 import asyncio
+import json
 import os
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
 BASE_URL = "https://api.spotinst.io"
+
+_DEFAULT_CONNECT_TIMEOUT = 10.0
+_DEFAULT_READ_TIMEOUT = 120.0
+_DEFAULT_WRITE_TIMEOUT = 120.0
+_DEFAULT_POOL_TIMEOUT = 10.0
 
 # API path prefixes per cloud provider
 AWS_CLUSTER = "/ocean/aws/k8s/cluster"
@@ -26,13 +34,20 @@ class SpotinstClient:
     ):
         self.token = token or os.environ["SPOTINST_TOKEN"]
         self.account_id = account_id or os.environ.get("SPOTINST_ACCOUNT_ID", "")
+        read_timeout = float(os.environ.get("SPOTINST_HTTP_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT))
+        write_timeout = float(os.environ.get("SPOTINST_HTTP_WRITE_TIMEOUT", _DEFAULT_WRITE_TIMEOUT))
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json",
             },
-            timeout=30.0,
+            timeout=httpx.Timeout(
+                connect=_DEFAULT_CONNECT_TIMEOUT,
+                read=read_timeout,
+                write=write_timeout,
+                pool=_DEFAULT_POOL_TIMEOUT,
+            ),
         )
 
     def _account_params(self, account_id: str = "") -> dict[str, str]:
@@ -53,6 +68,46 @@ class SpotinstClient:
                 "Check your token's policy/role in the Spot.io console."
             )
 
+    async def _request_with_logging(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Issue a request with stderr logging + explicit timeout wrapping.
+
+        Emits `method path body_size=N elapsed=X.Ys status=...` on stderr for
+        write requests so a hang shows up in MCP server stderr instead of
+        presenting as a silent stall. Converts httpx.TimeoutException into
+        TimeoutError with the same diagnostic info.
+        """
+        is_write = method.upper() in ("POST", "PUT", "PATCH", "DELETE")
+        body_bytes = json.dumps(body).encode("utf-8") if body is not None else b""
+        body_size = len(body_bytes)
+        start = time.monotonic()
+        try:
+            resp = await self._client.request(method, path, params=params, json=body)
+        except httpx.TimeoutException as e:
+            elapsed = time.monotonic() - start
+            msg = (
+                f"{method} {path} timed out after {elapsed:.1f}s "
+                f"(body_size={body_size}, error={type(e).__name__}: {e})"
+            )
+            if is_write:
+                print(f"[spotinst_client] {msg}", file=sys.stderr, flush=True)
+            raise TimeoutError(msg) from e
+        elapsed = time.monotonic() - start
+        if is_write:
+            print(
+                f"[spotinst_client] {method} {path} "
+                f"body_size={body_size} elapsed={elapsed:.2f}s status={resp.status_code}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return resp
+
     async def _get(
         self, path: str, params: dict[str, str] | None = None, account_id: str = ""
     ) -> Any:
@@ -68,8 +123,8 @@ class SpotinstClient:
     async def _post(
         self, path: str, body: dict[str, Any], account_id: str = ""
     ) -> Any:
-        resp = await self._client.post(
-            path, params=self._account_params(account_id), json=body
+        resp = await self._request_with_logging(
+            "POST", path, params=self._account_params(account_id), body=body
         )
         self._check_permission(resp, path)
         resp.raise_for_status()
@@ -79,8 +134,8 @@ class SpotinstClient:
     async def _put(
         self, path: str, body: dict[str, Any], account_id: str = ""
     ) -> Any:
-        resp = await self._client.put(
-            path, params=self._account_params(account_id), json=body
+        resp = await self._request_with_logging(
+            "PUT", path, params=self._account_params(account_id), body=body
         )
         self._check_permission(resp, path)
         resp.raise_for_status()
@@ -90,11 +145,8 @@ class SpotinstClient:
     async def _delete(
         self, path: str, account_id: str = "", body: dict[str, Any] | None = None
     ) -> Any:
-        resp = await self._client.request(
-            "DELETE",
-            path,
-            params=self._account_params(account_id),
-            json=body,
+        resp = await self._request_with_logging(
+            "DELETE", path, params=self._account_params(account_id), body=body
         )
         self._check_permission(resp, path)
         resp.raise_for_status()
@@ -515,11 +567,26 @@ class SpotinstClient:
         vng_id: str,
         updates: dict[str, Any],
         account_id: str = "",
+        auto_apply_tags: bool | None = None,
     ) -> Any:
+        if not (account_id or self.account_id):
+            raise ValueError(
+                "accountId is required by the Spotinst API. "
+                "Set SPOTINST_ACCOUNT_ID or pass account_id explicitly."
+            )
         body = {"launchSpec": updates}
-        return await self._put(
-            f"{AWS_VNG}/{vng_id}", body, account_id=account_id
-        )
+        path = f"{AWS_VNG}/{vng_id}"
+        if auto_apply_tags is not None:
+            aid = account_id or self.account_id
+            params = {"accountId": aid, "autoApplyTags": str(auto_apply_tags).lower()}
+            resp = await self._request_with_logging(
+                "PUT", path, params=params, body=body
+            )
+            self._check_permission(resp, path)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("response", data)
+        return await self._put(path, body, account_id=account_id)
 
     async def update_vng_azure(
         self,

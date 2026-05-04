@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-05-04
+
+### Fixed
+- **`update_vng` hang diagnosis** — fallout from the 2026-05-01 g3-prod GPU I/O incident, where `update_vng` stalled with no visible error and required a manual curl fallback to land the userdata fix:
+  - Split httpx timeout into explicit `connect=10s`, `read=120s`, `write=120s`, `pool=10s` (was a single 30s covering all phases). Read/write timeouts overridable via `SPOTINST_HTTP_READ_TIMEOUT` / `SPOTINST_HTTP_WRITE_TIMEOUT`.
+  - Wrap `httpx.TimeoutException` into `TimeoutError` with method, path, body size, and elapsed time so a hang surfaces as a loud error instead of a silent stall.
+  - Emit stderr log line on every write (`POST/PUT/PATCH/DELETE`): `method path body_size=N elapsed=X.Ys status=...`. Visible in the MCP server's stderr for post-hoc diagnosis.
+  - Raise `ValueError` when `accountId` is neither set via env nor passed explicitly — the Spot API spec requires it and used to fail opaquely.
+
+### Added
+- **`update_vng` auto-encodes plaintext `userData` to base64** — per the Spot API spec, `userData` must be base64-encoded. Plaintext bash scripts were the likely root cause of past silent failures. New `encode_user_data=true` parameter (default) base64-encodes when input doesn't already look like base64; set `false` to pass through as-is.
+- **`update_vng` post-update read-back** — the tool now returns `{put_result, readback}` so callers can verify the change actually landed. Readback errors are captured into `_readback_error` without re-raising.
+- **`update_vng` `auto_apply_tags` parameter** — maps to the Spot API's `autoApplyTags` query param; updates tags without triggering a roll.
+
+### Changed
+- Stderr logging is emitted only for write operations (reads stay quiet to avoid log spam).
+
+### Tests
+- Added 10 tests: `update_vng_with_auto_apply_tags`, `update_vng_requires_account_id`, `update_vng_wraps_timeout`, `timeout_respects_env_override`, `looks_like_base64`, `update_vng_auto_encodes_userdata`, `update_vng_skips_encode_when_already_base64`, `update_vng_opt_out_encoding`, `update_vng_returns_readback`, `update_vng_readback_error_captured` (92 total).
+
 ## [0.5.0] - 2026-03-23
 
 ### Added

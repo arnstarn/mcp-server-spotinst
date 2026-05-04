@@ -449,6 +449,51 @@ async def test_update_vng(client: SpotinstClient):
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_update_vng_with_auto_apply_tags(client: SpotinstClient):
+    """auto_apply_tags=True should be sent as a query param."""
+    route = respx.put("https://api.spotinst.io/ocean/aws/k8s/launchSpec/ols-abc").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "ols-abc"}]))
+    )
+    await client.update_vng("ols-abc", {"tags": []}, auto_apply_tags=True)
+    req = route.calls[0].request
+    assert "autoApplyTags=true" in str(req.url)
+    assert "accountId=act-test123" in str(req.url)
+
+
+@pytest.mark.asyncio
+async def test_update_vng_requires_account_id():
+    """update_vng must raise ValueError when no account_id is available."""
+    client = SpotinstClient(token="t", account_id="")
+    with pytest.raises(ValueError, match="accountId is required"):
+        await client.update_vng("ols-abc", {"tags": []})
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_update_vng_wraps_timeout(client: SpotinstClient):
+    """httpx.ReadTimeout from the underlying client should become TimeoutError with diagnostic info."""
+    respx.put("https://api.spotinst.io/ocean/aws/k8s/launchSpec/ols-abc").mock(
+        side_effect=httpx.ReadTimeout("timed out")
+    )
+    with pytest.raises(TimeoutError) as excinfo:
+        await client.update_vng("ols-abc", {"userData": "x" * 100})
+    msg = str(excinfo.value)
+    assert "/ocean/aws/k8s/launchSpec/ols-abc" in msg
+    assert "body_size=" in msg
+    assert "PUT" in msg
+
+
+@pytest.mark.asyncio
+async def test_timeout_respects_env_override(monkeypatch):
+    """SPOTINST_HTTP_READ_TIMEOUT should override the default read timeout."""
+    monkeypatch.setenv("SPOTINST_HTTP_READ_TIMEOUT", "5.0")
+    c = SpotinstClient(token="t", account_id="act-x")
+    # httpx exposes read via Timeout.read
+    assert c._client.timeout.read == 5.0
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_update_vng_azure(client: SpotinstClient):
     route = respx.put("https://api.spotinst.io/ocean/azure/np/virtualNodeGroup/vng-abc").mock(
         return_value=httpx.Response(200, json=_api_response([{"id": "vng-abc"}]))

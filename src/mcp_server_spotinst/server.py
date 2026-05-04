@@ -1,11 +1,26 @@
 """MCP server for Spot.io (Spotinst) API."""
 
+import base64
 import json
 
 import yaml
 from mcp.server.fastmcp import FastMCP
 
 from .spotinst_client import SpotinstClient
+
+
+def _looks_like_base64(s: str) -> bool:
+    """Best-effort check that a string is already base64-encoded."""
+    if not s:
+        return True
+    try:
+        decoded = base64.b64decode(s, validate=True)
+        # If decode succeeds AND the decoded bytes look like text, assume it's base64.
+        # An arbitrary shell script would NOT successfully validate as base64.
+        decoded.decode("utf-8", errors="strict")
+        return True
+    except Exception:
+        return False
 
 mcp = FastMCP("spotinst")
 _client: SpotinstClient | None = None
@@ -959,27 +974,57 @@ async def update_vng(
     updates_json: str,
     confirm: bool = False,
     account_id: str = "",
+    auto_apply_tags: bool | None = None,
+    encode_user_data: bool = True,
 ) -> str:
     """DESTRUCTIVE: Update an AWS VNG (launch spec) configuration.
     Requires confirm=true. Pass updates as a JSON string.
+
+    The Spot.io API requires `userData` to be **base64-encoded**. This tool
+    auto-encodes plaintext userData by default (set encode_user_data=false to
+    opt out if you're passing already-encoded data).
 
     Args:
         vng_id: The VNG/launch spec ID (e.g. ols-abc12345)
         updates_json: JSON string of fields to update (e.g. '{"resourceLimits": {"maxInstanceCount": 20}}')
         confirm: Must be true to execute. Safety guard.
         account_id: Optional account ID. Defaults to SPOTINST_ACCOUNT_ID env var.
+        auto_apply_tags: If true, update resource tags without triggering a roll.
+                         If None (default), omitted from request (Spot default applies).
+        encode_user_data: If true (default) and `userData` is present but not already
+                          base64, base64-encode it before sending. Set false to pass
+                          through as-is.
     """
     try:
         updates = json.loads(updates_json)
     except json.JSONDecodeError as e:
         return f"ERROR: Invalid JSON in updates_json: {e}"
+
+    if encode_user_data and isinstance(updates.get("userData"), str):
+        raw = updates["userData"]
+        if not _looks_like_base64(raw):
+            updates["userData"] = base64.b64encode(raw.encode("utf-8")).decode("ascii")
+
     if not confirm:
+        preview = dict(updates)
+        if isinstance(preview.get("userData"), str) and len(preview["userData"]) > 200:
+            preview["userData"] = (
+                preview["userData"][:200]
+                + f"... [truncated, total {len(preview['userData'])} chars]"
+            )
         return (
             f"SAFETY: Update NOT applied. Set confirm=true to execute.\n"
-            f"This will update VNG {vng_id} with: {json.dumps(updates, indent=2)}"
+            f"This will update VNG {vng_id} with: {json.dumps(preview, indent=2)}"
         )
-    result = await _get_client().update_vng(vng_id, updates, account_id)
-    return _format(result)
+    client = _get_client()
+    put_result = await client.update_vng(
+        vng_id, updates, account_id, auto_apply_tags=auto_apply_tags
+    )
+    try:
+        readback = await client.get_vng(vng_id, account_id)
+    except Exception as e:
+        readback = {"_readback_error": f"{type(e).__name__}: {e}"}
+    return _format({"put_result": put_result, "readback": readback})
 
 
 @mcp.tool()
