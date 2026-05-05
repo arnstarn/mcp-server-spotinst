@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-spotinst"
-version = "0.6.0"
+version = "0.7.0"
 description = "MCP server for Spot.io (Spotinst) API - manage Ocean clusters, VNGs, and Elastigroups"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -50,6 +50,9 @@ select = ["E", "F", "I"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+# Default run excludes live integration tests; opt in with `pytest tests/integration`.
+norecursedirs = ["tests/integration"]
 
 [tool.mypy]
 python_version = "3.10"

@@ -22,6 +22,63 @@ def _looks_like_base64(s: str) -> bool:
     except Exception:
         return False
 
+
+def _extract_launchspec(readback: object) -> dict | None:
+    """Pull the first launchSpec item out of a get_vng readback, tolerating shape variants."""
+    if not isinstance(readback, dict):
+        return None
+    items = readback.get("items")
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return items[0]
+    # Some code paths return the raw response with `response.items` still nested.
+    response = readback.get("response")
+    if isinstance(response, dict):
+        inner = response.get("items")
+        if isinstance(inner, list) and inner and isinstance(inner[0], dict):
+            return inner[0]
+    return None
+
+
+def _diff_submitted_vs_readback(
+    submitted: dict, readback: object
+) -> dict[str, dict]:
+    """Return a shallow field-level diff {field: {sent, observed}} for fields in
+    `submitted` whose value did not round-trip to `readback`. Empty dict means
+    everything we asked for landed.
+
+    `userData` is compared on decoded-plaintext bytes so we don't flag when the
+    server re-encodes the same content with different whitespace/padding.
+    """
+    observed = _extract_launchspec(readback)
+    if observed is None:
+        return {}
+    mismatches: dict[str, dict] = {}
+    for key, sent in submitted.items():
+        if key not in observed:
+            mismatches[key] = {"sent": sent, "observed": None}
+            continue
+        got = observed[key]
+        if key == "userData" and isinstance(sent, str) and isinstance(got, str):
+            try:
+                sent_bytes = base64.b64decode(sent, validate=True)
+            except Exception:
+                sent_bytes = sent.encode("utf-8")
+            try:
+                got_bytes = base64.b64decode(got, validate=True)
+            except Exception:
+                got_bytes = got.encode("utf-8")
+            if sent_bytes != got_bytes:
+                mismatches[key] = {
+                    "sent_bytes": len(sent_bytes),
+                    "observed_bytes": len(got_bytes),
+                    "note": "userData did not round-trip; server may have silently dropped the update",
+                }
+            continue
+        if sent != got:
+            mismatches[key] = {"sent": sent, "observed": got}
+    return mismatches
+
+
 mcp = FastMCP("spotinst")
 _client: SpotinstClient | None = None
 
@@ -1024,7 +1081,16 @@ async def update_vng(
         readback = await client.get_vng(vng_id, account_id)
     except Exception as e:
         readback = {"_readback_error": f"{type(e).__name__}: {e}"}
-    return _format({"put_result": put_result, "readback": readback})
+    payload: dict[str, object] = {"put_result": put_result, "readback": readback}
+    mismatches = _diff_submitted_vs_readback(updates, readback)
+    if mismatches:
+        payload["_readback_mismatch"] = mismatches
+        payload["_readback_mismatch_hint"] = (
+            "Fields we submitted did not round-trip to the server. Spot.io has "
+            "been seen to return 200 OK without persisting the change. Re-apply "
+            "or investigate before trusting the update."
+        )
+    return _format(payload)
 
 
 @mcp.tool()
@@ -1053,6 +1119,101 @@ async def update_vng_azure(
             f"This will update Azure VNG {vng_id} with: {json.dumps(updates, indent=2)}"
         )
     result = await _get_client().update_vng_azure(vng_id, updates, account_id)
+    return _format(result)
+
+
+@mcp.tool()
+async def create_vng(
+    ocean_id: str,
+    spec_json: str,
+    confirm: bool = False,
+    account_id: str = "",
+    initial_nodes: int | None = None,
+    encode_user_data: bool = True,
+) -> str:
+    """DESTRUCTIVE: Create a new AWS VNG (launch spec) under an Ocean cluster.
+    Requires confirm=true. Pass the launch spec fields as a JSON string.
+
+    `oceanId` is injected from the `ocean_id` argument; don't include it in `spec_json`.
+    Like update_vng, plaintext `userData` is auto-encoded to base64 by default.
+
+    Args:
+        ocean_id: The parent Ocean cluster ID (e.g. o-abcd1234). Required.
+        spec_json: JSON string of launch spec fields (name, instanceTypes, labels, taints,
+                   resourceLimits, userData, etc.). Do not include `oceanId`.
+        confirm: Must be true to execute. Safety guard.
+        account_id: Optional account ID. Defaults to SPOTINST_ACCOUNT_ID env var.
+        initial_nodes: If >0, Spot launches that many nodes immediately on create.
+        encode_user_data: If true (default) and `userData` is plaintext, base64-encode
+                          it before sending.
+    """
+    try:
+        spec = json.loads(spec_json)
+    except json.JSONDecodeError as e:
+        return f"ERROR: Invalid JSON in spec_json: {e}"
+
+    if "oceanId" in spec:
+        return "ERROR: Do not pass oceanId in spec_json; use the ocean_id argument."
+
+    if encode_user_data and isinstance(spec.get("userData"), str):
+        raw = spec["userData"]
+        if not _looks_like_base64(raw):
+            spec["userData"] = base64.b64encode(raw.encode("utf-8")).decode("ascii")
+
+    if not confirm:
+        preview = dict(spec)
+        if isinstance(preview.get("userData"), str) and len(preview["userData"]) > 200:
+            preview["userData"] = (
+                preview["userData"][:200]
+                + f"... [truncated, total {len(preview['userData'])} chars]"
+            )
+        return (
+            f"SAFETY: Create NOT executed. Set confirm=true to execute.\n"
+            f"This will create a VNG under Ocean {ocean_id} "
+            f"(initial_nodes={initial_nodes}) with: {json.dumps(preview, indent=2)}"
+        )
+    result = await _get_client().create_vng(
+        ocean_id, spec, account_id=account_id, initial_nodes=initial_nodes
+    )
+    return _format(result)
+
+
+@mcp.tool()
+async def delete_vng(
+    vng_id: str,
+    confirm: bool = False,
+    account_id: str = "",
+    delete_nodes: bool = False,
+    force_delete: bool = False,
+) -> str:
+    """DESTRUCTIVE: Delete an AWS VNG (launch spec).
+    Requires confirm=true.
+
+    Args:
+        vng_id: The VNG/launch spec ID to delete.
+        confirm: Must be true to execute. Safety guard.
+        account_id: Optional account ID. Defaults to SPOTINST_ACCOUNT_ID env var.
+        delete_nodes: If true, drain + detach + terminate all nodes in this VNG.
+                      If false (default), VNG is deleted but nodes continue until
+                      they naturally terminate or are moved.
+        force_delete: If true, delete even if this is the only non-template VNG.
+    """
+    if not confirm:
+        parts = [f"Delete VNG {vng_id}"]
+        if delete_nodes:
+            parts.append("AND drain+terminate all its nodes")
+        if force_delete:
+            parts.append("(force_delete=true)")
+        return (
+            f"SAFETY: Delete NOT executed. Set confirm=true to execute.\n"
+            f"This will {' '.join(parts)}."
+        )
+    result = await _get_client().delete_vng(
+        vng_id,
+        account_id=account_id,
+        delete_nodes=delete_nodes,
+        force_delete=force_delete,
+    )
     return _format(result)
 
 

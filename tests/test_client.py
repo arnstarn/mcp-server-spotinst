@@ -835,3 +835,81 @@ async def test_get_stateful_node_azure(client: SpotinstClient):
     )
     result = await client.get_stateful_node_azure("ssn-abc")
     assert result["items"][0]["status"] == "RUNNING"
+
+
+# --- create_vng / delete_vng ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_vng_posts_with_ocean_id_and_account(client: SpotinstClient):
+    """create_vng injects oceanId into the body and sends accountId as a query param."""
+    import json as _json
+
+    route = respx.post("https://api.spotinst.io/ocean/aws/k8s/launchSpec").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "ols-new"}]))
+    )
+    await client.create_vng("o-parent", {"name": "test-vng", "instanceTypes": ["m5.large"]})
+    req = route.calls[0].request
+    assert "accountId=act-test123" in str(req.url)
+    body = _json.loads(req.content)
+    assert body["launchSpec"]["oceanId"] == "o-parent"
+    assert body["launchSpec"]["name"] == "test-vng"
+    assert body["launchSpec"]["instanceTypes"] == ["m5.large"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_vng_with_initial_nodes(client: SpotinstClient):
+    """initial_nodes>0 should be sent as a query param."""
+    route = respx.post("https://api.spotinst.io/ocean/aws/k8s/launchSpec").mock(
+        return_value=httpx.Response(200, json=_api_response([{"id": "ols-new"}]))
+    )
+    await client.create_vng("o-parent", {"name": "test"}, initial_nodes=2)
+    req = route.calls[0].request
+    assert "initialNodes=2" in str(req.url)
+
+
+@pytest.mark.asyncio
+async def test_create_vng_requires_account_id():
+    """create_vng must raise ValueError when no account_id is available."""
+    c = SpotinstClient(token="t", account_id="")
+    with pytest.raises(ValueError, match="accountId is required"):
+        await c.create_vng("o-parent", {"name": "test"})
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_delete_vng_sends_account_id(client: SpotinstClient):
+    """delete_vng sends accountId as query param and returns a confirmation when body is empty."""
+    route = respx.delete("https://api.spotinst.io/ocean/aws/k8s/launchSpec/ols-del").mock(
+        return_value=httpx.Response(200, content=b"")
+    )
+    result = await client.delete_vng("ols-del")
+    req = route.calls[0].request
+    assert "accountId=act-test123" in str(req.url)
+    assert "deleteNodes" not in str(req.url)
+    assert "forceDelete" not in str(req.url)
+    assert result == {"deleted": True, "id": "ols-del"}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_delete_vng_with_delete_nodes_and_force(client: SpotinstClient):
+    """delete_nodes and force_delete should be sent as query params."""
+    route = respx.delete("https://api.spotinst.io/ocean/aws/k8s/launchSpec/ols-del").mock(
+        return_value=httpx.Response(200, content=b"")
+    )
+    await client.delete_vng("ols-del", delete_nodes=True, force_delete=True)
+    req = route.calls[0].request
+    url = str(req.url)
+    assert "deleteNodes=true" in url
+    assert "forceDelete=true" in url
+
+
+@pytest.mark.asyncio
+async def test_delete_vng_requires_account_id():
+    """delete_vng must raise ValueError when no account_id is available."""
+    c = SpotinstClient(token="t", account_id="")
+    with pytest.raises(ValueError, match="accountId is required"):
+        await c.delete_vng("ols-del")

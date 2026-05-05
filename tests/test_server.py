@@ -6,8 +6,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mcp_server_spotinst.server import (
+    _diff_submitted_vs_readback,
+    _extract_launchspec,
     _looks_like_base64,
     _truncate_items,
+    create_vng,
+    delete_vng,
     export_cluster_yaml,
     filter_clusters_by_tag,
     filter_vngs_by_tag,
@@ -157,9 +161,123 @@ async def test_update_vng_readback_error_captured():
     assert "readback failed" in parsed["readback"]["_readback_error"]
 
 
+def test_extract_launchspec_direct_items():
+    assert _extract_launchspec({"items": [{"id": "ols-1"}]}) == {"id": "ols-1"}
+
+
+def test_extract_launchspec_nested_response():
+    payload = {"response": {"items": [{"id": "ols-2"}]}}
+    assert _extract_launchspec(payload) == {"id": "ols-2"}
+
+
+def test_extract_launchspec_none_on_unknown_shape():
+    assert _extract_launchspec({}) is None
+    assert _extract_launchspec({"items": []}) is None
+    assert _extract_launchspec(None) is None
+
+
+def test_diff_submitted_vs_readback_empty_when_fields_match():
+    submitted = {"resourceLimits": {"maxInstanceCount": 20}}
+    readback = {"items": [{"resourceLimits": {"maxInstanceCount": 20}}]}
+    assert _diff_submitted_vs_readback(submitted, readback) == {}
+
+
+def test_diff_submitted_vs_readback_flags_missing_field():
+    submitted = {"resourceLimits": {"maxInstanceCount": 20}}
+    readback = {"items": [{"id": "ols-1"}]}
+    diff = _diff_submitted_vs_readback(submitted, readback)
+    assert "resourceLimits" in diff
+    assert diff["resourceLimits"]["observed"] is None
+
+
+def test_diff_submitted_vs_readback_flags_value_drift():
+    submitted = {"resourceLimits": {"maxInstanceCount": 20}}
+    readback = {"items": [{"resourceLimits": {"maxInstanceCount": 10}}]}
+    diff = _diff_submitted_vs_readback(submitted, readback)
+    assert diff["resourceLimits"]["sent"] == {"maxInstanceCount": 20}
+    assert diff["resourceLimits"]["observed"] == {"maxInstanceCount": 10}
+
+
+def test_diff_submitted_vs_readback_userdata_roundtrip_match():
+    import base64
+    payload = "#!/bin/bash\necho hi\n"
+    encoded = base64.b64encode(payload.encode()).decode()
+    submitted = {"userData": encoded}
+    readback = {"items": [{"userData": encoded}]}
+    assert _diff_submitted_vs_readback(submitted, readback) == {}
+
+
+def test_diff_submitted_vs_readback_userdata_silent_non_persist():
+    """Regression: mirrors the 2026-05-05 incident where Spot bumped
+    updatedAt but silently kept the old userData body."""
+    import base64
+    sent_body = b"#!/bin/bash\nset -uo pipefail\nwait_for_apt\n"
+    old_body = b"#!/bin/bash\nset -ex\napt-get update\n"
+    submitted = {"userData": base64.b64encode(sent_body).decode()}
+    readback = {"items": [{"userData": base64.b64encode(old_body).decode()}]}
+    diff = _diff_submitted_vs_readback(submitted, readback)
+    assert "userData" in diff
+    assert diff["userData"]["sent_bytes"] == len(sent_body)
+    assert diff["userData"]["observed_bytes"] == len(old_body)
+
+
+@pytest.mark.asyncio
+async def test_update_vng_flags_readback_mismatch():
+    """When userData silently doesn't persist, response must include _readback_mismatch."""
+    import base64
+    sent_body = b"#!/bin/bash\nset -uo pipefail\n"
+    old_body = b"#!/bin/bash\nset -ex\n"
+
+    async def fake_update(vng_id, updates, account_id, auto_apply_tags=None):
+        return {"items": [{"id": vng_id, "updatedAt": "2026-05-05T13:10:59Z"}]}
+
+    async def fake_get_vng(vng_id, account_id):
+        return {"items": [{"id": vng_id, "userData": base64.b64encode(old_body).decode()}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.update_vng = AsyncMock(side_effect=fake_update)
+        mock_client.return_value.get_vng = AsyncMock(side_effect=fake_get_vng)
+        result = await update_vng(
+            "ols-abc",
+            json.dumps({"userData": base64.b64encode(sent_body).decode()}),
+            confirm=True,
+            encode_user_data=False,
+        )
+    parsed = json.loads(result)
+    assert "_readback_mismatch" in parsed
+    assert "userData" in parsed["_readback_mismatch"]
+    assert parsed["_readback_mismatch"]["userData"]["sent_bytes"] == len(sent_body)
+
+
+@pytest.mark.asyncio
+async def test_update_vng_no_mismatch_when_userdata_persists():
+    """Happy path: readback matches submitted userData, no _readback_mismatch emitted."""
+    import base64
+    body = b"#!/bin/bash\nset -uo pipefail\n"
+    encoded = base64.b64encode(body).decode()
+
+    async def fake_update(vng_id, updates, account_id, auto_apply_tags=None):
+        return {"items": [{"id": vng_id}]}
+
+    async def fake_get_vng(vng_id, account_id):
+        return {"items": [{"id": vng_id, "userData": encoded}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.update_vng = AsyncMock(side_effect=fake_update)
+        mock_client.return_value.get_vng = AsyncMock(side_effect=fake_get_vng)
+        result = await update_vng(
+            "ols-abc",
+            json.dumps({"userData": encoded}),
+            confirm=True,
+            encode_user_data=False,
+        )
+    parsed = json.loads(result)
+    assert "_readback_mismatch" not in parsed
+
+
 def test_all_tools_registered():
     tools = [t.name for t in mcp._tool_manager.list_tools()]
-    assert len(tools) == 37  # 32 read + 5 write
+    assert len(tools) == 39  # 32 read + 7 write
     assert "list_all_clusters" in tools
     assert "list_clusters_azure" in tools
     assert "initiate_roll" in tools
@@ -582,3 +700,118 @@ async def test_filter_clusters_by_tag_compact():
         assert cluster["id"] == "o-1"
         assert "autoScaler" not in cluster
         assert "compute" not in cluster
+
+
+# --- create_vng / delete_vng tools ---
+
+
+@pytest.mark.asyncio
+async def test_create_vng_safety_guard():
+    """Without confirm=true, create_vng should return a SAFETY preview and not call the API."""
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.create_vng = AsyncMock()
+        result = await create_vng("o-parent", json.dumps({"name": "test"}))
+        assert "SAFETY" in result
+        mock_client.return_value.create_vng.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_vng_rejects_ocean_id_in_spec():
+    """oceanId in spec_json is ambiguous — should be rejected."""
+    result = await create_vng(
+        "o-parent",
+        json.dumps({"oceanId": "o-other", "name": "test"}),
+        confirm=True,
+    )
+    assert "ERROR" in result
+    assert "oceanId" in result
+
+
+@pytest.mark.asyncio
+async def test_create_vng_invalid_json():
+    result = await create_vng("o-parent", "not-json{", confirm=True)
+    assert "ERROR" in result
+
+
+@pytest.mark.asyncio
+async def test_create_vng_auto_encodes_userdata():
+    """create_vng should base64-encode plaintext userData like update_vng does."""
+    import base64
+    captured = {}
+
+    async def fake_create(ocean_id, spec, account_id="", initial_nodes=None):
+        captured["spec"] = spec
+        return {"items": [{"id": "ols-new"}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.create_vng = AsyncMock(side_effect=fake_create)
+        plaintext = "#!/bin/bash\nset -e\necho new-vng"
+        await create_vng(
+            "o-parent",
+            json.dumps({"name": "test", "userData": plaintext}),
+            confirm=True,
+        )
+    sent = captured["spec"]["userData"]
+    assert sent != plaintext
+    assert base64.b64decode(sent).decode() == plaintext
+
+
+@pytest.mark.asyncio
+async def test_create_vng_executes_on_confirm():
+    """confirm=true should actually call create_vng on the client."""
+    async def fake_create(ocean_id, spec, account_id="", initial_nodes=None):
+        return {"items": [{"id": "ols-new", "oceanId": ocean_id, "name": spec["name"]}]}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.create_vng = AsyncMock(side_effect=fake_create)
+        result = await create_vng(
+            "o-parent",
+            json.dumps({"name": "my-vng", "instanceTypes": ["m5.large"]}),
+            confirm=True,
+            initial_nodes=0,
+        )
+    parsed = json.loads(result)
+    assert parsed["items"][0]["id"] == "ols-new"
+    assert parsed["items"][0]["oceanId"] == "o-parent"
+
+
+@pytest.mark.asyncio
+async def test_delete_vng_safety_guard():
+    """Without confirm=true, delete_vng should return a SAFETY preview and not call the API."""
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.delete_vng = AsyncMock()
+        result = await delete_vng("ols-del")
+        assert "SAFETY" in result
+        mock_client.return_value.delete_vng.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_vng_preview_mentions_delete_nodes():
+    """When delete_nodes=true, the safety preview should flag node termination."""
+    result = await delete_vng("ols-del", delete_nodes=True)
+    assert "SAFETY" in result
+    assert "drain" in result.lower() or "terminate" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_delete_vng_executes_on_confirm():
+    """confirm=true should call delete_vng with all flags forwarded."""
+    captured = {}
+
+    async def fake_delete(vng_id, account_id="", delete_nodes=False, force_delete=False):
+        captured.update(
+            vng_id=vng_id,
+            delete_nodes=delete_nodes,
+            force_delete=force_delete,
+        )
+        return {"deleted": True, "id": vng_id}
+
+    with patch("mcp_server_spotinst.server._get_client") as mock_client:
+        mock_client.return_value.delete_vng = AsyncMock(side_effect=fake_delete)
+        await delete_vng(
+            "ols-del",
+            confirm=True,
+            delete_nodes=True,
+            force_delete=True,
+        )
+    assert captured == {"vng_id": "ols-del", "delete_nodes": True, "force_delete": True}
