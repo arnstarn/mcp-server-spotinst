@@ -18,6 +18,8 @@ from mcp_server_spotinst.server import (
 )
 from mcp_server_spotinst.spotinst_client import SpotinstClient
 
+from .conftest import _safe_spec, make_sandbox_name
+
 
 def _enabled() -> bool:
     return os.environ.get("SPOTINST_RUN_INTEGRATION") == "1"
@@ -43,14 +45,15 @@ async def test_create_vng_rejects_ocean_id_inside_spec(integration_config):
 
 async def test_create_vng_safety_preview_without_confirm(integration_config):
     """confirm=False must never hit the API."""
+    name = make_sandbox_name()
     result = await create_vng(
         ocean_id=integration_config["ocean_id"],
-        spec_json=json.dumps({"name": "preview-test", "imageId": integration_config["ami_id"]}),
+        spec_json=json.dumps({"name": name, "imageId": integration_config["ami_id"]}),
         confirm=False,
         account_id=integration_config["account_id"],
     )
     assert "SAFETY" in result
-    assert "preview-test" in result
+    assert name in result
 
 
 async def test_update_vng_plaintext_userdata_auto_encodes(ephemeral_vng, integration_config):
@@ -86,7 +89,7 @@ async def test_update_vng_auto_apply_tags(ephemeral_vng, integration_config):
     result = await update_vng(
         vng_id=ephemeral_vng,
         updates_json=json.dumps(
-            {"labels": [{"key": "mcp-integ", "value": "tagged"}]}
+            {"labels": [{"key": "sandbox-test", "value": "tagged"}]}
         ),
         confirm=True,
         account_id=integration_config["account_id"],
@@ -115,18 +118,9 @@ async def test_probe_token_capabilities_reports_write_access(integration_config)
 
 async def test_delete_vng_safety_preview(integration_config, integration_client):
     """Create a throwaway and verify confirm=False does not delete it."""
-    import uuid
-
-    name = f"mcp-integ-preview-{uuid.uuid4().hex[:6]}"
     created = await integration_client.create_vng(
         ocean_id=integration_config["ocean_id"],
-        spec={
-            "name": name,
-            "imageId": integration_config["ami_id"],
-            "instanceTypes": ["t3.small"],
-            "taints": [{"key": "mcp-integ", "value": "true", "effect": "NoSchedule"}],
-            "resourceLimits": {"maxInstanceCount": 1, "minInstanceCount": 0},
-        },
+        spec=_safe_spec(integration_config["ami_id"], make_sandbox_name()),
         account_id=integration_config["account_id"],
         initial_nodes=0,
     )
