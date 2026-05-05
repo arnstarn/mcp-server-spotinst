@@ -63,12 +63,18 @@ def integration_config() -> dict:
     }
 
 
-def _safe_spec(ami_id: str, name: str) -> dict:
-    """Spec that guarantees no node ever launches and no pod ever lands."""
+def _safe_spec(ami_id: str, name: str, instance_type: str = "c7a.medium") -> dict:
+    """Spec that guarantees no node ever launches and no pod ever lands.
+
+    `instance_type` must be a member of the Ocean cluster's allowed instance
+    types (Ocean rejects creates whose types aren't a subset of the cluster
+    whitelist). c7a.medium is the default because it's cheap and present in
+    most Primer Ocean whitelists; override via SPOTINST_TEST_INSTANCE_TYPE.
+    """
     return {
         "name": name,
         "imageId": ami_id,
-        "instanceTypes": ["t3.small"],
+        "instanceTypes": [instance_type],
         "labels": [{"key": TEST_VNG_TAINT_KEY, "value": TEST_VNG_TAINT_VALUE}],
         "taints": [
             {"key": TEST_VNG_TAINT_KEY, "value": TEST_VNG_TAINT_VALUE, "effect": "NoSchedule"},
@@ -83,8 +89,21 @@ def make_sandbox_name() -> str:
     return f"{TEST_VNG_NAME_PREFIX}{uuid.uuid4().hex[:8]}"
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest.fixture(autouse=True)
+def _reset_server_client_singleton():
+    """Each test runs in its own event loop; reset the module-level SpotinstClient
+    cache so tools that call `_get_client()` (update_vng, create_vng, delete_vng)
+    don't reuse an httpx client bound to a closed loop."""
+    import mcp_server_spotinst.server as server_module
+
+    server_module._client = None
+    yield
+    server_module._client = None
+
+
+@pytest_asyncio.fixture()
 async def integration_client():
+    """Function-scoped client so the per-test asyncio loop matches the httpx loop."""
     client = SpotinstClient()
     try:
         yield client
@@ -92,30 +111,47 @@ async def integration_client():
         await client.close()
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def session_sweep(integration_config, integration_client):
-    """Belt-and-suspenders: after the session, delete any lingering VNG whose
-    name starts with our prefix. Catches orphans from crashes inside a test."""
+@pytest_asyncio.fixture(scope="function", autouse=True)
+async def session_sweep(request, integration_config):
+    """Belt-and-suspenders cleanup. Runs after the FINAL test in the module to
+    delete any lingering VNG whose name starts with our prefix (catches orphans
+    from crashes inside a test or in ephemeral_vng teardown).
+
+    We gate on the last-test-index to only sweep once per module but still run
+    on the function-scoped event loop."""
     yield
+    # Only run the sweep after the last test in this module.
+    session = request.session
+    remaining = [
+        item
+        for item in session.items
+        if item.module is request.module and item.nodeid > request.node.nodeid
+    ]
+    if remaining:
+        return
+    sweep_client = SpotinstClient()
     try:
-        listing = await integration_client.list_vngs(integration_config["account_id"])
-    except Exception:
-        return
-    items = listing.get("items") if isinstance(listing, dict) else listing
-    if not isinstance(items, list):
-        return
-    for item in items:
-        name = (item or {}).get("name", "")
-        vng_id = (item or {}).get("id")
-        if name.startswith(TEST_VNG_NAME_PREFIX) and vng_id:
-            try:
-                await integration_client.delete_vng(
-                    vng_id=vng_id,
-                    account_id=integration_config["account_id"],
-                    delete_nodes=True,
-                )
-            except Exception:
-                pass  # best-effort cleanup
+        try:
+            listing = await sweep_client.list_vngs(integration_config["account_id"])
+        except Exception:
+            return
+        items = listing.get("items") if isinstance(listing, dict) else listing
+        if not isinstance(items, list):
+            return
+        for item in items:
+            name = (item or {}).get("name", "")
+            vng_id = (item or {}).get("id")
+            if name.startswith(TEST_VNG_NAME_PREFIX) and vng_id:
+                try:
+                    await sweep_client.delete_vng(
+                        vng_id=vng_id,
+                        account_id=integration_config["account_id"],
+                        delete_nodes=True,
+                    )
+                except Exception:
+                    pass  # best-effort cleanup
+    finally:
+        await sweep_client.close()
 
 
 @pytest_asyncio.fixture()

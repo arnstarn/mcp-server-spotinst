@@ -99,8 +99,9 @@ async def test_update_vng_auto_apply_tags(ephemeral_vng, integration_config):
     assert "put_result" in parsed
 
 
-async def test_update_vng_missing_account_id_raises():
-    """Bypass the tool wrapper's env fallback and assert the client raises."""
+async def test_update_vng_missing_account_id_raises(monkeypatch):
+    """Assert the client raises ValueError when neither env nor arg supplies accountId."""
+    monkeypatch.delenv("SPOTINST_ACCOUNT_ID", raising=False)
     client = SpotinstClient(token="dummy", account_id="")
     with pytest.raises(ValueError, match="accountId is required"):
         await client.update_vng(
@@ -113,7 +114,9 @@ async def test_update_vng_missing_account_id_raises():
 async def test_probe_token_capabilities_reports_write_access(integration_config):
     """End-to-end: token must report write access for this suite to be meaningful."""
     caps = await _get_client().probe_capabilities()
-    assert caps.get("write_access") is True, caps
+    # `write_access` is a list of granted write capability names
+    # (e.g. ['write_roll', 'write_detach']); must be non-empty for the suite.
+    assert caps.get("write_access"), caps
 
 
 async def test_delete_vng_safety_preview(integration_config, integration_client):
