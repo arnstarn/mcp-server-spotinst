@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-05-05
+
+### Added
+- **`create_vng`** — Create an AWS Ocean VNG (launch spec) under an existing Ocean cluster.
+  - `ocean_id` is a first-class argument; passing `oceanId` inside `spec_json` is rejected.
+  - Plaintext `userData` is auto-base64-encoded (opt out with `encode_user_data=false`).
+  - Optional `initial_nodes>0` launches that many nodes immediately.
+  - Requires `confirm=true`; safety preview shown otherwise.
+- **`delete_vng`** — Delete an AWS Ocean VNG (launch spec).
+  - `delete_nodes=true` drains+detaches+terminates all nodes in the VNG.
+  - `force_delete=true` permits deleting the only non-template VNG.
+  - Requires `confirm=true`; safety preview shown otherwise.
+- **`update_vng` readback-mismatch detection** — fallout from the 2026-05-05 dev triton-gpu incident, where Spot.io returned 200 OK and bumped `updatedAt` but silently did not persist the new `userData`. The tool now diffs every submitted field against the readback and surfaces any mismatch as `_readback_mismatch` with a `_readback_mismatch_hint`. `userData` is compared on decoded-plaintext bytes so benign re-encodes don't false-positive.
+
+### Tests
+- Unit tests for the readback-diff helper (`_diff_submitted_vs_readback`, `_extract_launchspec`) covering userData round-trip, silent non-persist, value drift, and nested response shapes.
+- New live integration suite under `tests/integration/` (opt in with `SPOTINST_RUN_INTEGRATION=1`) that spins up an ephemeral VNG, exercises `create_vng` / `update_vng` / `delete_vng` across encoded and plaintext userData, `auto_apply_tags`, safety previews, and teardown. Excluded from default `pytest` run via `norecursedirs`.
+
 ## [0.6.0] - 2026-05-04
 
 ### Fixed

@@ -598,6 +598,65 @@ class SpotinstClient:
             f"{AZURE_VNG}/{vng_id}", updates, account_id=account_id
         )
 
+    # --- Create VNG ---
+
+    async def create_vng(
+        self,
+        ocean_id: str,
+        spec: dict[str, Any],
+        account_id: str = "",
+        initial_nodes: int | None = None,
+    ) -> Any:
+        if not (account_id or self.account_id):
+            raise ValueError(
+                "accountId is required by the Spotinst API. "
+                "Set SPOTINST_ACCOUNT_ID or pass account_id explicitly."
+            )
+        aid = account_id or self.account_id
+        launch_spec = {"oceanId": ocean_id, **spec}
+        body = {"launchSpec": launch_spec}
+        params: dict[str, str] = {"accountId": aid}
+        if initial_nodes is not None:
+            params["initialNodes"] = str(initial_nodes)
+        resp = await self._request_with_logging(
+            "POST", AWS_VNG, params=params, body=body
+        )
+        self._check_permission(resp, AWS_VNG)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", data)
+
+    # --- Delete VNG ---
+
+    async def delete_vng(
+        self,
+        vng_id: str,
+        account_id: str = "",
+        delete_nodes: bool = False,
+        force_delete: bool = False,
+    ) -> Any:
+        if not (account_id or self.account_id):
+            raise ValueError(
+                "accountId is required by the Spotinst API. "
+                "Set SPOTINST_ACCOUNT_ID or pass account_id explicitly."
+            )
+        aid = account_id or self.account_id
+        path = f"{AWS_VNG}/{vng_id}"
+        params: dict[str, str] = {"accountId": aid}
+        if delete_nodes:
+            params["deleteNodes"] = "true"
+        if force_delete:
+            params["forceDelete"] = "true"
+        resp = await self._request_with_logging(
+            "DELETE", path, params=params, body=None
+        )
+        self._check_permission(resp, path)
+        resp.raise_for_status()
+        if not resp.content:
+            return {"deleted": True, "id": vng_id}
+        data = resp.json()
+        return data.get("response", data)
+
     # --- Stateful Nodes (AWS Managed Instances) ---
 
     async def list_stateful_nodes(self, account_id: str = "") -> Any:
